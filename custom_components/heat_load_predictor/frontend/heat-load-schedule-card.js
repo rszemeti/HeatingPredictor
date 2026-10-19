@@ -504,7 +504,23 @@ class HeatLoadScheduleCard extends HTMLElement {
   }
 }
 
-customElements.define("heat-load-schedule-card", HeatLoadScheduleCard);
+// Home Assistant's app script installs a scoped custom element registry
+// polyfill that replaces window.customElements with a new registry. This file
+// is injected alongside the app script and can finish loading first; a card
+// defined before the swap lands in the old registry, which dashboards no
+// longer read ("Custom element doesn't exist"). So wait for Home Assistant's
+// root element to be defined, which happens after any swap, then register in
+// whatever registry is current. Outside Home Assistant, register at once.
+const CARD_TAG = "heat-load-schedule-card";
+function registerCard() {
+  if (!window.customElements.get(CARD_TAG)) window.customElements.define(CARD_TAG, HeatLoadScheduleCard);
+}
+if (window.customElements.get("home-assistant") || !document.querySelector("home-assistant")) {
+  registerCard();
+} else {
+  window.customElements.whenDefined("home-assistant").then(registerCard);
+}
+
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "heat-load-schedule-card",

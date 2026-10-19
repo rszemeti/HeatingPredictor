@@ -1,7 +1,7 @@
 """Constants for Heat Load Predictor."""
 
 DOMAIN = "heat_load_predictor"
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR = "indoor_temp_entity"
