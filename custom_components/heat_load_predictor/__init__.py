@@ -11,8 +11,9 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
-from homeassistant.const import Platform
+from homeassistant.const import EVENT_COMPONENT_LOADED, Platform
 from homeassistant.core import (
+    Event,
     HomeAssistant,
     ServiceCall,
     ServiceResponse,
@@ -22,6 +23,7 @@ from homeassistant.core import (
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.setup import ATTR_COMPONENT
 
 from .const import CARD_URL, DOMAIN, VERSION
 from .coordinator import HeatLoadCoordinator
@@ -58,10 +60,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         await hass.http.async_register_static_paths(
             [StaticPathConfig(CARD_URL, str(card), True)]
         )
-    if "frontend" in hass.config.components:
-        from homeassistant.components.frontend import add_extra_js_url
-
-        add_extra_js_url(hass, f"{CARD_URL}?v={VERSION}")
+    _async_register_card(hass)
 
     websocket_api.async_register_command(hass, ws_entries)
     websocket_api.async_register_command(hass, ws_get_schedule)
@@ -103,6 +102,34 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         supports_response=SupportsResponse.ONLY,
     )
     return True
+
+
+def _add_card_js(hass: HomeAssistant) -> None:
+    from homeassistant.components.frontend import add_extra_js_url
+
+    add_extra_js_url(hass, f"{CARD_URL}?v={VERSION}")
+    _LOGGER.debug("Registered schedule card %s", CARD_URL)
+
+
+@callback
+def _async_register_card(hass: HomeAssistant) -> None:
+    """Load the schedule card on every dashboard.
+
+    During start-up this integration can be set up before the frontend, so
+    if the frontend isn't loaded yet, wait for it rather than skipping.
+    """
+
+    if "frontend" in hass.config.components:
+        _add_card_js(hass)
+        return
+
+    @callback
+    def _on_loaded(event: Event) -> None:
+        if event.data.get(ATTR_COMPONENT) == "frontend":
+            unsub()
+            _add_card_js(hass)
+
+    unsub = hass.bus.async_listen(EVENT_COMPONENT_LOADED, _on_loaded)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

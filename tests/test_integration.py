@@ -78,8 +78,9 @@ async def test_sensors(hass: HomeAssistant, fake_weather) -> None:
     assert {"start", "kwh", "heat_kwh", "t_out", "t_in", "t_target", "cop"} <= set(fc[0])
 
     day = float(hass.states.get("sensor.heat_pump_heating_electricity_next_24h").state)
-    # 2 °C, ~20 °C average: ~0.19*18-0.6 = 2.8 kW heat, COP 2.9 -> ~23 kWh/day
-    assert 18 < day < 30
+    # 2 °C, ~20 °C average: ~0.19*18-0.6 = 2.8 kW heat, COP 2.9 -> ~23 kWh/day.
+    # Starting inside the overnight setback adds a recovery, so allow for it.
+    assert 18 < day < 36
     tomorrow = hass.states.get("sensor.heat_pump_heating_electricity_tomorrow")
     assert float(tomorrow.state) > 15
     assert tomorrow.attributes["complete"] is True
@@ -177,3 +178,47 @@ async def test_weather_unavailable_retries(hass: HomeAssistant) -> None:
     entry.add_to_hass(hass)
     await hass.config_entries.async_setup(entry.entry_id)
     assert entry.state is config_entries.ConfigEntryState.SETUP_RETRY
+
+
+
+async def test_card_registered_when_frontend_loads_later(hass: HomeAssistant, fake_weather) -> None:
+    """On a real start-up the frontend may load after this integration."""
+    from unittest.mock import patch
+
+    from homeassistant.const import EVENT_COMPONENT_LOADED
+    from homeassistant.core import Event
+    from homeassistant.setup import ATTR_COMPONENT
+
+    assert "frontend" not in hass.config.components
+    from homeassistant.core import EventBus
+
+    listeners = []
+    real_listen = EventBus.async_listen
+
+    def spy(bus, event_type, cb, *args, **kwargs):
+        unsub = real_listen(bus, event_type, cb, *args, **kwargs)
+        if event_type == EVENT_COMPONENT_LOADED and getattr(cb, "__name__", "") == "_on_loaded":
+            listeners.append(cb)
+        return unsub
+
+    with (
+        patch.object(EventBus, "async_listen", autospec=True, side_effect=spy),
+        patch("custom_components.heat_load_predictor._add_card_js") as add,
+    ):
+        await _setup(hass)
+        add.assert_not_called()
+        assert len(listeners) == 1
+        on_loaded = listeners[0]
+        on_loaded(Event(EVENT_COMPONENT_LOADED, {ATTR_COMPONENT: "sensor"}))
+        add.assert_not_called()
+        on_loaded(Event(EVENT_COMPONENT_LOADED, {ATTR_COMPONENT: "frontend"}))
+        add.assert_called_once_with(hass)
+
+
+async def test_card_registered_when_frontend_already_loaded(hass: HomeAssistant, fake_weather) -> None:
+    from unittest.mock import patch
+
+    hass.config.components.add("frontend")
+    with patch("custom_components.heat_load_predictor._add_card_js") as add:
+        await _setup(hass)
+        add.assert_called_once_with(hass)
