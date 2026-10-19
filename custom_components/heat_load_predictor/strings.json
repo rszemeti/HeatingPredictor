@@ -1,0 +1,135 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Heat Load Predictor",
+        "description": "The defaults suit a typical house with an 8 kW heat pump. Replace them with your own figures here, or later under Configure. The README explains how to estimate each one.",
+        "data": {
+          "name": "Name",
+          "weather_entity": "Weather forecast",
+          "indoor_temp_entity": "Indoor temperature (optional)",
+          "heat_loss_w_per_k": "Heat loss",
+          "thermal_capacity_kwh_per_k": "Thermal capacity",
+          "internal_gains_w": "Internal gains",
+          "standby_w": "Standby power",
+          "cop_curve": "COP curve",
+          "max_output_curve": "Maximum heat output curve",
+          "period_minutes": "Period length (minutes)",
+          "horizon_hours": "Forecast horizon (hours)",
+          "preheat": "Pre-heat ahead of schedule"
+        },
+        "data_description": {
+          "weather_entity": "Weather entity with an hourly forecast.",
+          "indoor_temp_entity": "Sets the house's starting temperature. Without it, the model assumes the house is at its target.",
+          "heat_loss_w_per_k": "Whole-house heat loss per degree of indoor-outdoor difference. A heat loss survey's design figure divided by (21 - design outdoor temperature) gives this; see the README for other ways to estimate it.",
+          "thermal_capacity_kwh_per_k": "Heat stored per degree of house temperature. Sets how fast the house cools and recovers. See the README to measure it.",
+          "internal_gains_w": "Average free heat from people, appliances and sun.",
+          "standby_w": "Controls and circulation pump, drawn all the time.",
+          "cop_curve": "COP at each outdoor temperature, as temp:COP pairs, e.g. -10:2.2, 2:2.9, 7:3.6. Use figures for your weather-compensated flow temperatures.",
+          "max_output_curve": "Heat pump maximum heat output (kW) at each outdoor temperature, as temp:kW pairs.",
+          "period_minutes": "Length of each forecast period.",
+          "horizon_hours": "How far ahead to forecast. Limited by the weather forecast.",
+          "preheat": "Start heating early so the house reaches each step up in the schedule on time."
+        }
+      }
+    },
+    "error": {
+      "bad_curve": "Write the curve as temperature:value pairs separated by commas.",
+      "curve_positive": "Curve values must be above zero."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Heat Load Predictor settings",
+        "data": {
+          "weather_entity": "Weather forecast",
+          "indoor_temp_entity": "Indoor temperature (optional)",
+          "heat_loss_w_per_k": "Heat loss",
+          "thermal_capacity_kwh_per_k": "Thermal capacity",
+          "internal_gains_w": "Internal gains",
+          "standby_w": "Standby power",
+          "cop_curve": "COP curve",
+          "max_output_curve": "Maximum heat output curve",
+          "period_minutes": "Period length (minutes)",
+          "horizon_hours": "Forecast horizon (hours)",
+          "preheat": "Pre-heat ahead of schedule"
+        },
+        "data_description": {
+          "weather_entity": "Weather entity with an hourly forecast.",
+          "indoor_temp_entity": "Sets the house's starting temperature. Without it, the model assumes the house is at its target.",
+          "heat_loss_w_per_k": "Whole-house heat loss per degree of indoor-outdoor difference. A heat loss survey's design figure divided by (21 - design outdoor temperature) gives this; see the README for other ways to estimate it.",
+          "thermal_capacity_kwh_per_k": "Heat stored per degree of house temperature. Sets how fast the house cools and recovers. See the README to measure it.",
+          "internal_gains_w": "Average free heat from people, appliances and sun.",
+          "standby_w": "Controls and circulation pump, drawn all the time.",
+          "cop_curve": "COP at each outdoor temperature, as temp:COP pairs, e.g. -10:2.2, 2:2.9, 7:3.6. Use figures for your weather-compensated flow temperatures.",
+          "max_output_curve": "Heat pump maximum heat output (kW) at each outdoor temperature, as temp:kW pairs.",
+          "period_minutes": "Length of each forecast period.",
+          "horizon_hours": "How far ahead to forecast. Limited by the weather forecast.",
+          "preheat": "Start heating early so the house reaches each step up in the schedule on time."
+        }
+      }
+    },
+    "error": {
+      "bad_curve": "Write the curve as temperature:value pairs separated by commas.",
+      "curve_positive": "Curve values must be above zero."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "current_period": {
+        "name": "Heating electricity this period"
+      },
+      "next_24h": {
+        "name": "Heating electricity next 24h"
+      },
+      "rest_of_today": {
+        "name": "Heating electricity rest of today"
+      },
+      "tomorrow": {
+        "name": "Heating electricity tomorrow"
+      },
+      "peak_power_24h": {
+        "name": "Heating peak power next 24h"
+      }
+    }
+  },
+  "exceptions": {
+    "no_entry": {
+      "message": "No Heat Load Predictor is set up."
+    },
+    "bad_schedule": {
+      "message": "Invalid schedule: {error}"
+    }
+  },
+  "services": {
+    "set_schedule": {
+      "name": "Set schedule",
+      "description": "Replace the target temperature schedule.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "Which predictor, if you have more than one."
+        },
+        "schedule": {
+          "name": "Schedule",
+          "description": "Schedule object: interpolation (step/linear) and days mon-sun, each a list of points with a time and a temp."
+        }
+      }
+    },
+    "get_forecast": {
+      "name": "Get forecast",
+      "description": "Return the per-period forecast and totals.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "Which predictor, if you have more than one."
+        },
+        "refresh": {
+          "name": "Refresh first",
+          "description": "Rerun the model before returning."
+        }
+      }
+    }
+  }
+}

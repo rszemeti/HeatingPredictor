@@ -1,0 +1,21 @@
+set_schedule:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: heat_load_predictor
+    schedule:
+      required: true
+      example: '{"interpolation": "step", "days": {"mon": [{"time": "00:00", "temp": 18}, {"time": "06:30", "temp": 20.5}]}}'
+      selector:
+        object:
+get_forecast:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: heat_load_predictor
+    refresh:
+      default: false
+      selector:
+        boolean:

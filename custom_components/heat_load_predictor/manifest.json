@@ -1,0 +1,14 @@
+{
+  "domain": "heat_load_predictor",
+  "name": "Heat Load Predictor",
+  "after_dependencies": ["frontend", "weather"],
+  "codeowners": ["@rszemeti"],
+  "config_flow": true,
+  "dependencies": ["http", "websocket_api"],
+  "documentation": "https://github.com/rszemeti/HeatingPredictor",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/rszemeti/HeatingPredictor/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
