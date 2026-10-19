@@ -2,7 +2,9 @@ name: Release
 
 on:
   release:
-    types: [published]
+    # "edited" too, so retagging a release rebuilds its zip rather than
+    # leaving the old one attached.
+    types: [published, edited]
 
 permissions:
   contents: write
@@ -12,9 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - name: Set version in manifest
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${TAG#v}"
           python3 - "$VERSION" <<'PY'
           import json, sys
           p = "custom_components/heat_load_predictor/manifest.json"
@@ -25,4 +31,6 @@ jobs:
         run: cd custom_components/heat_load_predictor && zip -r ../../heat_load_predictor.zip .
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.release.tag_name }}
           files: heat_load_predictor.zip
+          overwrite_files: true

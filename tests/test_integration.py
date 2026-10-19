@@ -222,3 +222,17 @@ async def test_card_registered_when_frontend_already_loaded(hass: HomeAssistant,
     with patch("custom_components.heat_load_predictor._add_card_js") as add:
         await _setup(hass)
         add.assert_called_once_with(hass)
+
+
+async def test_card_message_while_waiting_for_weather(hass: HomeAssistant, hass_ws_client) -> None:
+    await async_setup_component(hass, "http", {})
+    hass.states.async_set("weather.home", "unavailable")
+    entry = MockConfigEntry(domain=DOMAIN, title="Heat pump", data={}, options=dict(OPTIONS))
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    client = await hass_ws_client(hass)
+    await client.send_json({"id": 1, "type": f"{DOMAIN}/schedule/get"})
+    msg = await client.receive_json()
+    assert not msg["success"]
+    assert "waiting to start" in msg["error"]["message"]
+    assert "weather.home" in msg["error"]["message"]

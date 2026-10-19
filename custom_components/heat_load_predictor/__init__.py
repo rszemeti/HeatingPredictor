@@ -49,6 +49,17 @@ def _coordinator(hass: HomeAssistant, entry_id: str | None) -> HeatLoadCoordinat
     return loaded[0].runtime_data
 
 
+def _not_found_message(hass: HomeAssistant) -> str:
+    """Why there's no loaded predictor, for the card to show."""
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if entry.state is ConfigEntryState.SETUP_RETRY:
+            return (
+                "Heat Load Predictor is waiting to start: "
+                f"{entry.reason or 'the weather forecast is not available yet'}"
+            )
+    return "No Heat Load Predictor is set up"
+
+
 def _response(coord: HeatLoadCoordinator) -> dict[str, Any]:
     return {"entry_id": coord.config_entry.entry_id, **(coord.data or {})}
 
@@ -178,7 +189,7 @@ def ws_get_schedule(
     try:
         coord = _coordinator(hass, msg.get("entry_id"))
     except ServiceValidationError:
-        connection.send_error(msg["id"], "not_found", "No Heat Load Predictor is set up")
+        connection.send_error(msg["id"], "not_found", _not_found_message(hass))
         return
     connection.send_result(
         msg["id"], {"entry_id": coord.config_entry.entry_id, "schedule": coord.schedule}
@@ -200,7 +211,7 @@ async def ws_set_schedule(
     try:
         coord = _coordinator(hass, msg.get("entry_id"))
     except ServiceValidationError:
-        connection.send_error(msg["id"], "not_found", "No Heat Load Predictor is set up")
+        connection.send_error(msg["id"], "not_found", _not_found_message(hass))
         return
     try:
         cleaned = await coord.async_set_schedule(msg["schedule"])
@@ -218,6 +229,6 @@ def ws_forecast(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
     try:
         coord = _coordinator(hass, msg.get("entry_id"))
     except ServiceValidationError:
-        connection.send_error(msg["id"], "not_found", "No Heat Load Predictor is set up")
+        connection.send_error(msg["id"], "not_found", _not_found_message(hass))
         return
     connection.send_result(msg["id"], _response(coord))
