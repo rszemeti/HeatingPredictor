@@ -42,6 +42,13 @@
     "step": {
       "init": {
         "title": "Heat Load Predictor settings",
+        "menu_options": {
+          "heating": "Heating model",
+          "battery": "Battery planner"
+        }
+      },
+      "heating": {
+        "title": "Heating model",
         "data": {
           "weather_entity": "Weather forecast",
           "indoor_temp_entity": "Indoor temperature (optional)",
@@ -68,11 +75,48 @@
           "horizon_hours": "How far ahead to forecast. Limited by the weather forecast.",
           "preheat": "Start heating early so the house reaches each step up in the schedule on time."
         }
+      },
+      "battery": {
+        "title": "Battery planner",
+        "description": "Plans when to charge the battery in cheap windows so it covers the heat pump and house until the next one, and when to discharge overnight to make room for solar. Automations copy the plan into your inverter; see the README for a Solis example.",
+        "data": {
+          "battery_enabled": "Plan the battery",
+          "battery_soc_entity": "Battery state of charge",
+          "solar_today_entity": "Solar forecast today (Solcast)",
+          "solar_tomorrow_entity": "Solar forecast tomorrow (Solcast)",
+          "battery_capacity_kwh": "Usable battery capacity",
+          "battery_min_soc": "Minimum SOC",
+          "battery_reserve_soc": "Arrive at each cheap window at",
+          "baseload_kw": "Rest of the house (average)",
+          "export_limit_kw": "Export limit",
+          "charge_power_kw": "Maximum grid charge rate",
+          "discharge_power_kw": "Maximum discharge rate",
+          "cheap_windows": "Cheap windows (charge)",
+          "discharge_windows": "Discharge windows (make room for solar)",
+          "discharge_threshold_soc": "Skip discharge if target is above",
+          "solar_headroom_kwh": "Extra room to leave for solar"
+        },
+        "data_description": {
+          "battery_soc_entity": "A sensor reporting the battery's state of charge in %.",
+          "solar_today_entity": "A sensor with a detailedForecast attribute of half-hour slots (period_start, pv_estimate in kW), as provided by the Solcast integration. Leave empty if you have no solar.",
+          "solar_tomorrow_entity": "Tomorrow's equivalent, so overnight plans can see the next day's solar.",
+          "battery_min_soc": "The inverter's lowest allowed SOC. Plans never go below it.",
+          "battery_reserve_soc": "Each charge is sized so the battery reaches the next cheap window at this SOC. Set a few % above the minimum to absorb forecast errors.",
+          "baseload_kw": "Average draw of everything except the heat pump.",
+          "export_limit_kw": "Solar beyond what the house uses and this export limit has to go into the battery or be lost.",
+          "cheap_windows": "Daily times, e.g. 04:00-07:00, 13:00-16:00, 22:00-00:00 (Cosy Octopus). Each window is a charge slot, numbered in this order.",
+          "discharge_windows": "Daily times to empty the battery ahead of big solar days, e.g. 00:30-05:30. Leave empty to never discharge.",
+          "discharge_threshold_soc": "If the room the solar needs only means discharging to above this SOC, it isn't worth it and the window is skipped.",
+          "solar_headroom_kwh": "Added to the solar room calculation as a safety margin."
+        }
       }
     },
     "error": {
       "bad_curve": "Write the curve as temperature:value pairs separated by commas.",
-      "curve_positive": "Curve values must be above zero."
+      "curve_positive": "Curve values must be above zero.",
+      "bad_windows": "Write windows as HH:MM-HH:MM separated by commas.",
+      "soc_required": "Choose the battery state of charge sensor.",
+      "reserve_below_min": "The arrival SOC can't be below the minimum SOC."
     }
   },
   "entity": {
@@ -91,6 +135,12 @@
       },
       "peak_power_24h": {
         "name": "Heating peak power next 24h"
+      },
+      "battery_plan": {
+        "name": "Battery plan"
+      },
+      "battery_min_soc_24h": {
+        "name": "Battery lowest SOC next 24h"
       }
     }
   },

@@ -1,0 +1,44 @@
+alias: "Solis: Set Storage Mode Based on Solar vs Battery Space"
+description: >
+  Every 30 minutes, compare remaining battery capacity against remaining solar
+  forecast. Switch between Feed-in Priority and Self-Use accordingly. During a
+  Cosy cheap window whose charge slot the planner has enabled, pick the variant
+  that allows grid charging, so the inverter follows the slot; at all other
+  times keep grid charging off, exactly as before.
+triggers:
+  - minutes: /30
+    trigger: time_pattern
+conditions:
+  - condition: template
+    value_template: >
+      {{ states('sensor.solis8_battery_soc') not in ['unavailable', 'unknown',
+      'none']
+         and states('sensor.solcast_pv_forecast_forecast_remaining_today') not in ['unavailable', 'unknown', 'none'] }}
+actions:
+  - variables:
+      battery_soc: "{{ states('sensor.solis8_battery_soc') | float(0) }}"
+      solar_remaining: >-
+        {{ states('sensor.solcast_pv_forecast_forecast_remaining_today') |
+        float(0) }}
+      battery_space_kwh: "{{ ((100 - battery_soc) / 100) * 32 }}"
+      # Cosy windows -> charge slot bit: 04-07 slot 1, 13-16 slot 2, 22-24 slot 3.
+      window_bit: >-
+        {% set h = now().hour %}
+        {{ 1 if 4 <= h < 7 else 2 if 13 <= h < 16 else 4 if h >= 22 else 0 }}
+      charging: >-
+        {{ window_bit > 0 and
+           (states('number.solis8_timed_charge_discharge_on_off') | int(0)
+            | bitwise_and(window_bit)) > 0 }}
+      base_mode: >-
+        {{ 'Feed-in priority' if solar_remaining > battery_space_kwh else 'Self-Use' }}
+      new_mode: "{{ base_mode if charging else base_mode ~ ' - No Grid Charging' }}"
+  - if:
+      - condition: template
+        value_template: "{{ states('select.solis8_energy_storage_control_switch') != new_mode }}"
+    then:
+      - action: select.select_option
+        target:
+          entity_id: select.solis8_energy_storage_control_switch
+        data:
+          option: "{{ new_mode }}"
+mode: single

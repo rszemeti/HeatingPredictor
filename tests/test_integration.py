@@ -162,6 +162,8 @@ async def test_config_and_options_flow(hass: HomeAssistant, fake_weather) -> Non
 
     entry = hass.config_entries.async_entries(DOMAIN)[0]
     result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.MENU
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "heating"})
     assert result["type"] is FlowResultType.FORM
     new = {**entry.options, "period_minutes": "10"}
     result = await hass.config_entries.options.async_configure(result["flow_id"], new)
@@ -236,3 +238,102 @@ async def test_card_message_while_waiting_for_weather(hass: HomeAssistant, hass_
     assert not msg["success"]
     assert "waiting to start" in msg["error"]["message"]
     assert "weather.home" in msg["error"]["message"]
+
+
+
+# --------------------------------------------------------------------------
+# Battery planner
+# --------------------------------------------------------------------------
+
+BATTERY = {
+    "battery_enabled": True,
+    "battery_soc_entity": "sensor.battery_soc",
+    "solar_today_entity": "sensor.solcast_today",
+    "solar_tomorrow_entity": "sensor.solcast_tomorrow",
+    "battery_capacity_kwh": 32,
+    "battery_min_soc": 15,
+    "battery_reserve_soc": 20,
+    "baseload_kw": 0.4,
+    "export_limit_kw": 5,
+    "charge_power_kw": 8,
+    "discharge_power_kw": 5,
+    "cheap_windows": "04:00-07:00, 13:00-16:00, 22:00-00:00",
+    "discharge_windows": "00:30-05:30",
+    "discharge_threshold_soc": 80,
+    "solar_headroom_kwh": 2.6,
+}
+
+
+def _solcast(hass, peak_kw):
+    import math as _m
+
+    today = dt_util.start_of_local_day()
+    for name, day in (("sensor.solcast_today", today), ("sensor.solcast_tomorrow", today + timedelta(days=1))):
+        slots = []
+        for i in range(48):
+            t = day + timedelta(minutes=30 * i)
+            h = t.hour + t.minute / 60
+            kw = peak_kw * _m.sin(_m.pi * (h - 8) / 8) if 8 <= h <= 16 else 0.0
+            slots.append({"period_start": t, "pv_estimate": round(kw, 3)})
+        hass.states.async_set(name, "1", {"detailedForecast": slots})
+
+
+async def test_battery_plan_sensor(hass: HomeAssistant, fake_weather) -> None:
+    hass.states.async_set("sensor.battery_soc", "40", {"unit_of_measurement": "%"})
+    _solcast(hass, 1.5)
+    await _setup(hass, {**OPTIONS, **BATTERY})
+    st = hass.states.get("sensor.heat_pump_battery_plan")
+    assert st is not None and st.state != "unavailable", st
+    a = st.attributes
+    assert a["soc_now"] == 40 and a["solar_forecast"] is True
+    # Every cheap window and the discharge window has a next occurrence.
+    assert {"charge_1", "charge_2", "charge_3", "discharge_1"} <= set(a["slots"])
+    for key in ("charge_1", "charge_2", "charge_3"):
+        w = a["slots"][key]
+        assert {"start", "end", "enabled", "target_soc", "reason"} <= set(w)
+        assert 15 <= w["target_soc"] <= 100
+    # A cold day with little sun: discharge isn't worth it, charging is.
+    assert a["slots"]["discharge_1"]["enabled"] is False
+    assert any(a["slots"][k]["enabled"] for k in ("charge_1", "charge_2", "charge_3"))
+    assert st.state.startswith("Charge to ")
+    low = hass.states.get("sensor.heat_pump_battery_lowest_soc_next_24h")
+    assert 15 <= float(low.state) <= 100
+
+
+async def test_battery_plan_unavailable_without_soc(hass: HomeAssistant, fake_weather) -> None:
+    await _setup(hass, {**OPTIONS, **BATTERY})
+    assert hass.states.get("sensor.heat_pump_battery_plan").state == "unavailable"
+    # Heating sensors are unaffected.
+    assert hass.states.get("sensor.heat_pump_heating_electricity_next_24h").state != "unavailable"
+
+
+async def test_battery_sensors_absent_when_disabled(hass: HomeAssistant, fake_weather) -> None:
+    await _setup(hass)
+    assert hass.states.get("sensor.heat_pump_battery_plan") is None
+
+
+async def test_battery_options_step(hass: HomeAssistant, fake_weather) -> None:
+    entry = await _setup(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "battery"})
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "battery"
+    bad = {**BATTERY, "cheap_windows": "4am to 7am"}
+    result = await hass.config_entries.options.async_configure(result["flow_id"], bad)
+    assert result["errors"] == {"cheap_windows": "bad_windows"}
+    good = {**BATTERY, "cheap_windows": "04:00-07:00,13:00-16:00, 22:00-24:00"}
+    result = await hass.config_entries.options.async_configure(result["flow_id"], good)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options["cheap_windows"] == "04:00-07:00, 13:00-16:00, 22:00-00:00"
+    assert entry.options["heat_loss_w_per_k"] == 190   # heating settings kept
+
+
+async def test_forecast_consistent_between_runs_without_indoor_sensor(hass: HomeAssistant, fake_weather) -> None:
+    """Later runs start from the previous run's modelled indoor temperature."""
+    entry = await _setup(hass)
+    coord = entry.runtime_data
+    first = {r["start"]: r["kwh"] for r in coord.data["periods"]}
+    await coord.async_refresh()
+    second = {r["start"]: r["kwh"] for r in coord.data["periods"]}
+    common = sorted(set(first) & set(second))
+    assert common
+    assert all(abs(first[k] - second[k]) < 1e-6 for k in common)

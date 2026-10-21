@@ -163,6 +163,33 @@ This is the heat pump's maximum heat output in kW at each outdoor temperature, i
 - **Pre-heat:** start heating early so the house reaches each step up in the schedule on time.
 - **Indoor temperature sensor (optional):** starts each run from the measured temperature instead of assuming the house is on target.
 
+## Battery planner (optional)
+
+If you have a home battery and a time-of-use tariff, the integration can plan when to charge it so the heat pump and the rest of the house are covered between cheap windows. It can also plan when to discharge overnight to make room for a big solar day. Turn it on under **Configure → Battery planner**.
+
+The planner steps through the forecast period by period: heat pump electricity plus a baseload for the rest of the house, minus the solar forecast, starting from the battery's current state of charge. For each window:
+
+- **Cheap windows (charge):** charge to the lowest SOC that still reaches the next cheap window at your chosen arrival SOC. This is sized from the deepest dip of the running balance across the gap.
+- **Discharge windows:** discharge to make room for solar the house can neither use nor export (beyond your export limit), plus a safety headroom. If that would only mean discharging to above a threshold (80 % by default), it isn't worth it and the window is skipped.
+- **Solar room wins:** a charge never fills space the solar will need, and a charge window that overlaps an active discharge is switched off.
+
+The defaults suit Cosy Octopus (cheap 04:00-07:00, 13:00-16:00, 22:00-00:00). Solar comes from the [Solcast](https://github.com/BJReplay/ha-solcast-solar) integration's `detailedForecast` attribute.
+
+### Sensors
+
+| Entity | Meaning |
+|---|---|
+| `…_battery_plan` | State is a summary such as "Charge to 45% at 04:00". The `slots` attribute holds the next occurrence of each window, keyed `charge_1`, `charge_2`, … and `discharge_1`, each with `start`, `end`, `enabled`, `target_soc`, `projected_soc` and a plain-English `reason`. `windows` lists every planned window, and `soc_forecast` the projected SOC per period. |
+| `…_battery_lowest_soc_next_24h` | Lowest projected SOC over the next 24 hours, which is useful for alerts. |
+
+### Applying the plan to your inverter
+
+The integration only plans. A short automation copies the plan into your inverter just before each window. [`examples/solis/apply_battery_plan.yaml`](examples/solis/apply_battery_plan.yaml) does this for Solis inverters using the timed charge and discharge slots of the Solis Modbus integration (`number.solis8_timed_…`; change the prefix to match yours). It writes discharge slot 1 at 00:25 and charge slots 1-3 at 03:50, 12:50 and 21:50, and logs each decision. If the plan is unavailable, it leaves discharge off and charges to 80 %.
+
+[`examples/solis/storage_mode.yaml`](examples/solis/storage_mode.yaml) switches the storage mode every 30 minutes. It chooses Feed-in priority when the day's remaining solar won't fit in the battery, otherwise Self-Use, and allows grid charging only while a planned charge slot is running.
+
+For other inverters, read the same `slots` attribute and write the equivalent settings.
+
 ## How the model works
 
 The house is treated as one thermal mass:

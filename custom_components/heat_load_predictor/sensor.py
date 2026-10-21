@@ -12,13 +12,13 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy, UnitOfPower
+from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, VERSION
+from .const import CONF_BATTERY_ENABLED, DOMAIN, VERSION
 from .coordinator import HeatLoadCoordinator
 
 
@@ -77,7 +77,10 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator: HeatLoadCoordinator = entry.runtime_data
-    async_add_entities(HeatLoadSensor(coordinator, desc) for desc in SENSORS)
+    entities: list[SensorEntity] = [HeatLoadSensor(coordinator, desc) for desc in SENSORS]
+    if entry.options.get(CONF_BATTERY_ENABLED):
+        entities += [BatteryPlanSensor(coordinator), BatteryMinSocSensor(coordinator)]
+    async_add_entities(entities)
 
 
 class HeatLoadSensor(CoordinatorEntity[HeatLoadCoordinator], SensorEntity):
@@ -121,3 +124,60 @@ class HeatLoadSensor(CoordinatorEntity[HeatLoadCoordinator], SensorEntity):
             attrs["start_temp_measured"] = data["start_temp_measured"]
             attrs["forecast"] = data["periods"]
         return attrs
+
+
+class _BatteryBase(CoordinatorEntity[HeatLoadCoordinator], SensorEntity):
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: HeatLoadCoordinator, key: str) -> None:
+        super().__init__(coordinator)
+        entry = coordinator.config_entry
+        self._attr_translation_key = key
+        self._attr_unique_id = f"{entry.entry_id}_{key}"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)})
+
+    @property
+    def _plan(self) -> dict[str, Any] | None:
+        data = self.coordinator.data or {}
+        plan = data.get("battery")
+        return None if not plan or "error" in plan else plan
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._plan is not None
+
+
+class BatteryPlanSensor(_BatteryBase):
+    """The battery plan: summary as state, full plan in attributes."""
+
+    _unrecorded_attributes = frozenset({"windows", "slots", "soc_forecast", "next"})
+
+    def __init__(self, coordinator: HeatLoadCoordinator) -> None:
+        super().__init__(coordinator, "battery_plan")
+
+    @property
+    def native_value(self) -> str | None:
+        plan = self._plan
+        return plan["summary"] if plan else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        plan = self._plan
+        if not plan:
+            return None
+        return {k: plan[k] for k in ("soc_now", "solar_forecast", "next", "slots", "windows", "soc_forecast")}
+
+
+class BatteryMinSocSensor(_BatteryBase):
+    """Lowest projected battery SOC over the next 24 hours."""
+
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_native_unit_of_measurement = PERCENTAGE
+
+    def __init__(self, coordinator: HeatLoadCoordinator) -> None:
+        super().__init__(coordinator, "battery_min_soc_24h")
+
+    @property
+    def native_value(self) -> float | None:
+        plan = self._plan
+        return plan["min_soc_24h"] if plan else None
