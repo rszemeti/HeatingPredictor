@@ -337,3 +337,21 @@ async def test_forecast_consistent_between_runs_without_indoor_sensor(hass: Home
     common = sorted(set(first) & set(second))
     assert common
     assert all(abs(first[k] - second[k]) < 1e-6 for k in common)
+
+
+async def test_battery_plan_appears_when_soc_sensor_arrives(hass: HomeAssistant, fake_weather, caplog) -> None:
+    """Start-up order: the inverter's SOC sensor turns up after the integration."""
+    await _setup(hass, {**OPTIONS, **BATTERY})
+    assert hass.states.get("sensor.heat_pump_battery_plan").state == "unavailable"
+    assert "Battery plan unavailable: battery SOC from sensor.battery_soc is missing" in caplog.text
+
+    hass.states.async_set("sensor.battery_soc", "unavailable")
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.heat_pump_battery_plan").state == "unavailable"
+
+    hass.states.async_set("sensor.battery_soc", "55", {"unit_of_measurement": "%"})
+    await hass.async_block_till_done()
+    await hass.async_block_till_done()
+    st = hass.states.get("sensor.heat_pump_battery_plan")
+    assert st.state != "unavailable", st
+    assert st.attributes["soc_now"] == 55

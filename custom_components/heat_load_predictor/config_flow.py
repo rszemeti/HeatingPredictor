@@ -124,7 +124,7 @@ def _battery_schema(current: dict[str, Any]) -> vol.Schema:
         vol.Required(CONF_BATTERY_ENABLED, default=d[CONF_BATTERY_ENABLED]): selector.BooleanSelector(),
     }
     for key, cfg in (
-        (CONF_SOC_ENTITY, {"domain": "sensor", "device_class": "battery"}),
+        (CONF_SOC_ENTITY, {"domain": "sensor"}),
         (CONF_SOLAR_TODAY, {"domain": "sensor"}),
         (CONF_SOLAR_TOMORROW, {"domain": "sensor"}),
     ):

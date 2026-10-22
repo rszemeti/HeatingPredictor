@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTemperature
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -88,8 +90,40 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Modelled indoor temperature from the last run, (UTC time, °C), used
         # as the starting point when there's no indoor sensor.
         self._last_tin: list[tuple[datetime, float]] = []
+        self._battery_error: str | None = None
 
     # ---------------------------------------------------------------- schedule
+
+    @callback
+    def async_watch_battery_inputs(self) -> Callable[[], None]:
+        """Rebuild a failed battery plan as soon as its inputs come back.
+
+        At start-up the inverter's SOC sensor (or the solar forecast) may not
+        exist yet; rather than wait for the next scheduled update, refresh when
+        one of them changes while the plan is unavailable.
+        """
+        o = self.config_entry.options
+        ids = [o.get(k) for k in (CONF_SOC_ENTITY, CONF_SOLAR_TODAY, CONF_SOLAR_TOMORROW)]
+        ids = [i for i in ids if i]
+        if not o.get(CONF_BATTERY_ENABLED) or not ids:
+            return lambda: None
+
+        soc_id = o.get(CONF_SOC_ENTITY)
+
+        @callback
+        def _changed(event: Event) -> None:
+            plan = (self.data or {}).get("battery")
+            if plan is not None and "error" not in plan:
+                return
+            new = event.data.get("new_state")
+            if event.data.get("entity_id") == soc_id:
+                try:
+                    float(new.state if new else "x")
+                except ValueError:
+                    return  # still not a number; wait for one
+            self.hass.async_create_task(self.async_request_refresh())
+
+        return async_track_state_change_event(self.hass, ids, _changed)
 
     async def async_load_schedule(self) -> None:
         stored = await self._store.async_load()
@@ -261,7 +295,18 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except ValueError:
             soc_now = None
         if soc_now is None:
-            return {"error": f"battery SOC from {o.get(CONF_SOC_ENTITY)} is unavailable"}
+            error = (
+                f"battery SOC from {o.get(CONF_SOC_ENTITY)} is "
+                f"{soc_state.state if soc_state else 'missing'}; the plan will "
+                "be made as soon as it reports a number"
+            )
+            if error != self._battery_error:
+                _LOGGER.warning("Battery plan unavailable: %s", error)
+            self._battery_error = error
+            return {"error": error}
+        if self._battery_error:
+            _LOGGER.info("Battery plan available again")
+        self._battery_error = None
 
         dt_h = self.period / 60
         starts = [dt_util.as_local(r.start) for r in results]
