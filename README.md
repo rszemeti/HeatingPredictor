@@ -192,9 +192,11 @@ With the planner on, the schedule card also shows the plan for each day. Charge 
 
 ### Applying the plan to your inverter
 
-The integration only plans. A short automation copies the plan into your inverter just before each window. [`examples/solis/apply_battery_plan.yaml`](examples/solis/apply_battery_plan.yaml) does this for Solis inverters using the timed charge and discharge slots of the Solis Modbus integration (`number.solis8_timed_…`; change the prefix to match yours). It writes discharge slot 1 at 00:25 and charge slots 1-3 at 03:50, 12:50 and 21:50, and logs each decision. If the plan is unavailable, it leaves discharge off and charges to 80 %.
+The integration only plans. One automation, [`examples/solis/battery_control.yaml`](examples/solis/battery_control.yaml), drives a Solis inverter from the plan using the Solis Modbus integration's timed charge and discharge slots (`number.solis8_timed_…`; change the names to match yours). It does three jobs:
 
-[`examples/solis/storage_mode.yaml`](examples/solis/storage_mode.yaml) switches the storage mode every 30 minutes. It chooses Feed-in priority when the day's remaining solar won't fit in the battery, otherwise Self-Use. Grid charging stays allowed in both modes, because the plan only switches on a charge slot for the window it was planned for. Check that the inverter's force-charge SOC is below your minimum SOC, or Self-Use will top the battery up from the grid whenever it reaches the floor.
+- **Apply the plan.** Just before each window it writes the slot's times, target and on/off: discharge slot 1 at 00:25, charge slots 1-3 at 03:50, 12:50 and 21:50. If the plan is unavailable, discharge stays off and charging falls back to 80 %.
+- **Stop discharging at the target.** During the discharge window it switches the slot off once the battery reaches its target, so the inverter doesn't import from the grid to hold that level.
+- **Choose the storage mode.** Every 30 minutes it selects Feed-in priority when the day's remaining solar won't fit in the battery, otherwise Self-Use, with grid charging allowed in both. Check that the inverter's force-charge SOC is below your minimum SOC, or Self-Use will top the battery up from the grid whenever it reaches the floor.
 
 For other inverters, read the same `slots` attribute and write the equivalent settings.
 

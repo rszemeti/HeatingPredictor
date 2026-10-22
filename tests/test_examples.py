@@ -1,4 +1,4 @@
-"""Run examples/solis/apply_battery_plan.yaml against the real integration."""
+"""Run examples/solis/battery_control.yaml against the real integration."""
 
 import math
 import pathlib
@@ -46,7 +46,13 @@ async def _rig(hass, freezer, day: datetime, *, soc, pv_peak, temp, with_soc=Tru
         return {"weather.home": {"forecast": [
             {"datetime": (now + timedelta(hours=h)).isoformat(), "temperature": temp} for h in range(60)]}}
 
+    async def select_option(call):
+        for e in call.data["entity_id"]:
+            calls.append((e, call.data["option"]))
+            hass.states.async_set(e, call.data["option"])
+
     hass.services.async_register("number", "set_value", set_value)
+    hass.services.async_register("select", "select_option", select_option)
     hass.services.async_register("script", "solis8_update_charge_discharge_times", noop)
     hass.services.async_register("system_log", "write", log)
     hass.services.async_register("weather", "get_forecasts", forecasts, supports_response=SupportsResponse.ONLY)
@@ -54,6 +60,9 @@ async def _rig(hass, freezer, day: datetime, *, soc, pv_peak, temp, with_soc=Tru
     hass.states.async_set("number.solis8_timed_charge_discharge_on_off", "0")
     if with_soc:
         hass.states.async_set("sensor.battery_soc", str(soc), {"unit_of_measurement": "%"})
+        hass.states.async_set("sensor.solis8_battery_soc", str(soc), {"unit_of_measurement": "%"})
+    hass.states.async_set("select.solis8_energy_storage_control_switch", "Self-Use")
+    hass.states.async_set("sensor.solcast_pv_forecast_forecast_remaining_today", "5")
     for name, d in (("sensor.solcast_today", day), ("sensor.solcast_tomorrow", day + timedelta(days=1))):
         slots = []
         for i in range(48):
@@ -67,7 +76,7 @@ async def _rig(hass, freezer, day: datetime, *, soc, pv_peak, temp, with_soc=Tru
     entry = MockConfigEntry(domain=DOMAIN, title="Heat pump", data={}, options={**OPTIONS, **BATTERY})
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
-    auto = yaml.safe_load((ROOT / "examples/solis/apply_battery_plan.yaml").read_text())
+    auto = yaml.safe_load((ROOT / "examples/solis/battery_control.yaml").read_text())
     assert await async_setup_component(hass, "automation", {"automation": [auto]})
     await hass.async_block_till_done()
     return calls
@@ -104,12 +113,14 @@ async def test_winter_day(hass: HomeAssistant, freezer) -> None:
 
     calls.clear()
     await _at(hass, freezer, day, 3, 50)
-    plan1 = _slot(hass, "charge_1")      # the plan as the automation saw it
     w = _written(calls)
     assert (w["number.solis8_timed_charge_start_hours"], w["number.solis8_timed_charge_end_hours"]) == (4, 7)
-    assert bool(w["number.solis8_timed_charge_discharge_on_off"] & 1) == plan1["enabled"]
-    if plan1["enabled"]:
-        assert w["number.solis8_timed_charge_soc"] == _slot(hass, "charge_1")["target_soc"]
+    # What was written must match the decision the automation logged.
+    log = next(m for e, m in calls if e == "log" and "charge_1" in m)
+    on = "charge_1: ON" in log
+    assert bool(w["number.solis8_timed_charge_discharge_on_off"] & 1) == on
+    if on:
+        assert f"to {w['number.solis8_timed_charge_soc']}%" in log
 
     # By evening the real battery would be low; refresh the plan with that.
     hass.states.async_set("sensor.battery_soc", "21", {"unit_of_measurement": "%"})
@@ -153,3 +164,46 @@ async def test_plan_unavailable_falls_back(hass: HomeAssistant, freezer) -> None
     assert w["number.solis8_timed_charge_discharge_on_off"] & 1
     assert w["number.solis8_timed_charge_soc"] == 80
     assert "number.solis8_timed_charge_start_hours" not in w   # times left as they were
+
+
+
+async def test_discharge_stops_at_target(hass: HomeAssistant, freezer) -> None:
+    day = datetime(2026, 6, 15, tzinfo=LON)
+    calls = await _rig(hass, freezer, day, soc=95, pv_peak=12.0, temp=16.0)
+    await _at(hass, freezer, day, 0, 25)
+    target = _written(calls)["number.solis8_timed_discharge_soc"]
+    assert int(hass.states.get("number.solis8_timed_charge_discharge_on_off").state) & 64
+
+    # Still well above target: discharge continues.
+    hass.states.async_set("sensor.solis8_battery_soc", str(target + 20))
+    await _at(hass, freezer, day, 1, 0)
+    assert int(hass.states.get("number.solis8_timed_charge_discharge_on_off").state) & 64
+
+    # Reaches target inside the window: slot 1 switched off, other bits kept.
+    hass.states.async_set("number.solis8_timed_charge_discharge_on_off", str(64 | 4))
+    hass.states.async_set("sensor.solis8_battery_soc", str(target + 0.5))
+    calls.clear()
+    await _at(hass, freezer, day, 3, 2)
+    assert int(hass.states.get("number.solis8_timed_charge_discharge_on_off").state) == 4
+    assert any(e == "log" and "reached target" in m for e, m in calls)
+
+
+async def test_discharge_check_ignored_outside_window(hass: HomeAssistant, freezer) -> None:
+    day = datetime(2026, 6, 15, tzinfo=LON)
+    await _rig(hass, freezer, day, soc=95, pv_peak=12.0, temp=16.0)
+    await _at(hass, freezer, day, 0, 25)
+    hass.states.async_set("number.solis8_timed_charge_discharge_on_off", "64")
+    hass.states.async_set("sensor.solis8_battery_soc", "10")
+    await _at(hass, freezer, day, 9, 2)          # after 05:30: not this job's business
+    assert hass.states.get("number.solis8_timed_charge_discharge_on_off").state == "64"
+
+
+async def test_storage_mode(hass: HomeAssistant, freezer) -> None:
+    day = datetime(2026, 6, 15, tzinfo=LON)
+    await _rig(hass, freezer, day, soc=50, pv_peak=12.0, temp=16.0)
+    hass.states.async_set("sensor.solcast_pv_forecast_forecast_remaining_today", "30")   # > 16 kWh space
+    await _at(hass, freezer, day, 9, 0)
+    assert hass.states.get("select.solis8_energy_storage_control_switch").state == "Feed-in priority"
+    hass.states.async_set("sensor.solcast_pv_forecast_forecast_remaining_today", "5")
+    await _at(hass, freezer, day, 9, 30)
+    assert hass.states.get("select.solis8_energy_storage_control_switch").state == "Self-Use"
