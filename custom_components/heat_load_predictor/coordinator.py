@@ -313,6 +313,10 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "soc_forecast": [
                 {"time": t.isoformat(), "soc": round(v, 1)} for t, v in plan.soc
             ],
+            # For the card only (not exposed as a sensor attribute).
+            "solar": [
+                {"start": t.isoformat(), "kwh": round(k, 3)} for t, k in zip(starts, pv)
+            ] if solar_ok else [],
         }
 
 

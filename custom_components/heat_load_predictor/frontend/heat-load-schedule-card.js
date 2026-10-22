@@ -9,6 +9,8 @@
  *   time_step: 15        # minutes; drag snaps to this (Shift: 5)
  *   temp_step: 0.5       # °C; drag snaps to this (Shift: 0.1)
  *   y_min / y_max        # temperature axis, default 14–24 (widens to fit)
+ *   show_battery: true   # battery windows and projected SOC, if the planner is on
+ *   show_solar: true     # solar forecast bars (own scale), if the planner is on
  *
  * Interaction: drag a point to move it; click empty space to add a point;
  * double-click or right-click a point to delete it.
@@ -19,7 +21,8 @@ const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const W = 760, H = 320;
 const M = { l: 46, r: 50, t: 26, b: 30 };
-const PW = W - M.l - M.r, PH = H - M.t - M.b;
+let PW = W - M.l - M.r;
+const PH = H - M.t - M.b;
 
 const toMin = (s) => { const [h, m] = s.split(":").map(Number); return h * 60 + m; };
 const toHHMM = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
@@ -49,7 +52,7 @@ function tempAt(schedule, di, minute) {
 
 class HeatLoadScheduleCard extends HTMLElement {
   setConfig(config) {
-    this._config = { time_step: 15, temp_step: 0.5, y_min: 14, y_max: 24, ...config };
+    this._config = { time_step: 15, temp_step: 0.5, y_min: 14, y_max: 24, show_battery: true, show_solar: true, ...config };
     this._day = (new Date().getDay() + 6) % 7;
     if (!this.shadowRoot) this._build();
   }
@@ -95,8 +98,10 @@ class HeatLoadScheduleCard extends HTMLElement {
     try {
       const f = await this._ws("forecast");
       this._forecast = f.periods || [];
+      this._battery = f.battery && !f.battery.error ? f.battery : null;
     } catch (e) {
       this._forecast = [];
+      this._battery = null;
     }
     this._render();
   }
@@ -222,6 +227,17 @@ class HeatLoadScheduleCard extends HTMLElement {
         .bar:hover { opacity: .8; }
         .curve { fill: none; stroke: var(--primary-color, #03a9f4); stroke-width: 2.5; }
         .tin { fill: none; stroke: var(--primary-text-color); stroke-width: 1.5; stroke-dasharray: 4 4; opacity: .6; }
+        .sun { fill: #f4c430; opacity: .28; }
+        .win.charge { fill: var(--success-color, #43a047); }
+        .win.discharge { fill: #ff8f00; }
+        .win { opacity: .13; }
+        .win.off { opacity: .04; stroke: var(--secondary-text-color); stroke-dasharray: 3 3; stroke-opacity: .6; }
+        .winlbl { font-size: 11px; font-weight: 500; cursor: help; }
+        .winlbl.charge { fill: var(--success-color, #43a047); }
+        .winlbl.discharge { fill: #ff8f00; }
+        .winlbl.off { fill: var(--secondary-text-color); font-weight: 400; }
+        .soc { fill: none; stroke: var(--success-color, #43a047); stroke-width: 2; }
+        .socax text { fill: var(--success-color, #43a047); font-size: 11px; }
         .now { stroke: var(--error-color, #db4437); stroke-width: 1.5; opacity: .7; }
         .pt { fill: var(--card-background-color, #fff); stroke: var(--primary-color, #03a9f4); stroke-width: 2.5; cursor: grab; }
         .pt.drag { fill: var(--primary-color); cursor: grabbing; }
@@ -254,6 +270,7 @@ class HeatLoadScheduleCard extends HTMLElement {
           <span><span class="sw" style="border-top:3px solid var(--primary-color,#03a9f4)"></span>Target</span>
           <span><span class="sw" style="border-top:2px dashed var(--primary-text-color)"></span>Modelled indoor</span>
           <span><span class="sw" style="height:10px;background:var(--accent-color,#ff9800);opacity:.5"></span>Heating electricity (kWh per period)</span>
+          <span class="legend-batt"></span>
         </div>
         <div class="hint">Drag points to move them, click empty space to add one, and double-click or right-click a point to delete it. Hold Shift for finer steps.</div>
         <div class="table"></div>
@@ -306,7 +323,20 @@ class HeatLoadScheduleCard extends HTMLElement {
     r.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = () => this._copyTo(b.dataset.copy)));
   }
 
+  get _showBattery() { return !!(this._battery && this._config.show_battery); }
+
+  /** Minutes [start, end) of an ISO local time range clipped to `date`, or null. */
+  _clip(startIso, endIso, date) {
+    const sd = startIso.slice(0, 10), ed = endIso.slice(0, 10);
+    if (sd > date || ed < date) return null;
+    const s = sd < date ? 0 : toMin(startIso.slice(11, 16));
+    const e = ed > date ? 1440 : toMin(endIso.slice(11, 16));
+    return e > s ? [s, e] : null;
+  }
+
   _renderSvg() {
+    M.r = this._showBattery ? 92 : 50;
+    PW = W - M.l - M.r;
     const [lo, hi] = this._yRange();
     const kmax = this._kwhMax();
     const { rows } = this._dayForecast();
@@ -324,8 +354,42 @@ class HeatLoadScheduleCard extends HTMLElement {
       parts.push(`<text x="${M.l + PW + 6}" y="${M.t + PH - (k / 4) * PH + 4}">${v.toFixed(2)}</text>`);
     }
     parts.push(`<text x="${M.l + PW + 6}" y="12">kWh</text><text x="${M.l - 6}" y="12" text-anchor="end">°C</text></g>`);
+    const date = this._dayForecast().date;
+    const bat = this._showBattery ? this._battery : null;
+    if (bat) {
+      parts.push(`<g class="socax">`);
+      for (let k = 0; k <= 4; k++) parts.push(`<text x="${M.l + PW + 50}" y="${M.t + PH - (k / 4) * PH + 4}">${k * 25}%</text>`);
+      parts.push(`<text x="${M.l + PW + 50}" y="12">SOC</text></g>`);
+    }
 
     parts.push(`<rect class="hit" x="${M.l}" y="${M.t}" width="${PW}" height="${PH}"/>`);
+
+    // battery windows (behind everything else)
+    this._winShown = [];
+    if (bat && date) {
+      (bat.windows || []).forEach((w) => {
+        const c = this._clip(w.start, w.end, date);
+        if (!c) return;
+        const cls = `${w.kind}${w.enabled ? "" : " off"}`;
+        const x0 = this._x(c[0]), x1 = this._x(c[1]);
+        parts.push(`<rect class="win ${cls}" pointer-events="none" x="${x0}" y="${M.t}" width="${Math.max(1, x1 - x0)}" height="${PH}"/>`);
+        const lbl = w.enabled ? `${w.kind === "charge" ? "▲" : "▼"} ${w.target_soc}%` : "off";
+        const i = this._winShown.push(w) - 1;
+        parts.push(`<text class="winlbl ${cls}" data-win="${i}" x="${(x0 + x1) / 2}" y="${M.t + 12}" text-anchor="middle">${lbl}</text>`);
+      });
+    }
+
+    // solar forecast, scaled to its own peak
+    if (bat && date && this._config.show_solar && (bat.solar || []).length) {
+      const smax = Math.max(0.01, ...bat.solar.map((r) => r.kwh));
+      const per = this._guessPeriod();
+      for (const r of bat.solar) {
+        if (r.start.slice(0, 10) !== date || r.kwh <= 0) continue;
+        const s = toMin(r.start.slice(11, 16));
+        const h = (r.kwh / smax) * PH * 0.9;
+        parts.push(`<rect class="sun" pointer-events="none" x="${this._x(s)}" y="${M.t + PH - h}" width="${Math.max(1, this._x(s + per) - this._x(s))}" height="${h}"/>`);
+      }
+    }
 
     // forecast bars
     for (const row of rows) {
@@ -344,8 +408,22 @@ class HeatLoadScheduleCard extends HTMLElement {
       parts.push(`<polyline class="tin" points="${pts.join(" ")}" pointer-events="none"/>`);
     }
 
+    // projected battery SOC (values at period ends)
+    if (bat && date) {
+      const pts = [];
+      for (const r of bat.soc_forecast || []) {
+        const d = r.time.slice(0, 10), m = toMin(r.time.slice(11, 16));
+        let x = null;
+        if (d === date) x = m;
+        else if (d > date && m === 0 && pts.length) x = 1440;
+        if (x === null) continue;
+        pts.push(`${this._x(x)},${M.t + PH * (1 - r.soc / 100)}`);
+        if (x === 1440) break;
+      }
+      if (pts.length > 1) parts.push(`<polyline class="soc" pointer-events="none" points="${pts.join(" ")}"/>`);
+    }
+
     // now marker
-    const { date } = this._dayForecast();
     if (date && this._forecast?.length && this._forecast[0].start.slice(0, 10) === date) {
       const nowMin = toMin(this._forecast[0].start.slice(11, 16));
       parts.push(`<line class="now" pointer-events="none" x1="${this._x(nowMin)}" x2="${this._x(nowMin)}" y1="${M.t}" y2="${M.t + PH}"/>`);
@@ -378,6 +456,16 @@ class HeatLoadScheduleCard extends HTMLElement {
       el.addEventListener("mousemove", (e) => this._showTip(e, el.dataset.bar));
       el.addEventListener("mouseleave", () => (this._tip.style.display = "none"));
     });
+    this._svg.querySelectorAll("[data-win]").forEach((el) => {
+      el.addEventListener("mousemove", (e) => this._showWinTip(e, this._winShown[Number(el.dataset.win)]));
+      el.addEventListener("mouseleave", () => (this._tip.style.display = "none"));
+    });
+    const lb = this.shadowRoot.querySelector(".legend-batt");
+    lb.innerHTML = bat ? `<span><span class="sw" style="border-top:2px solid var(--success-color,#43a047)"></span>Battery SOC</span>
+      <span><span class="sw" style="height:10px;background:var(--success-color,#43a047);opacity:.25"></span>Charge window</span>
+      <span><span class="sw" style="height:10px;background:#ff8f00;opacity:.25"></span>Discharge window</span>
+      ${this._config.show_solar && (bat.solar || []).length ? `<span><span class="sw" style="height:10px;background:#f4c430;opacity:.45"></span>Solar (own scale)</span>` : ""}` : "";
+    lb.style.display = bat ? "contents" : "none";
   }
 
   _guessPeriod() {
@@ -386,17 +474,43 @@ class HeatLoadScheduleCard extends HTMLElement {
     return 30;
   }
 
+  _batteryAt(start) {
+    const bat = this._showBattery ? this._battery : null;
+    if (!bat) return "";
+    const t = Date.parse(start), per = this._guessPeriod() * 60000;
+    const sun = (bat.solar || []).find((r) => Date.parse(r.start) === t);
+    const soc = (bat.soc_forecast || []).find((r) => Date.parse(r.time) === t + per);
+    const parts = [];
+    if (sun && sun.kwh > 0) parts.push(`Solar ${sun.kwh.toFixed(2)} kWh`);
+    if (soc) parts.push(`Battery ${Math.round(soc.soc)}%`);
+    return parts.length ? `<br>${parts.join(" · ")}` : "";
+  }
+
+  _placeTip(e) {
+    const box = this.shadowRoot.querySelector(".wrap").getBoundingClientRect();
+    this._tip.style.display = "block";
+    const x = e.clientX - box.left + 12;
+    this._tip.style.left = `${Math.max(0, Math.min(x, box.width - this._tip.offsetWidth - 4))}px`;
+    this._tip.style.top = `${e.clientY - box.top + 12}px`;
+  }
+
+  _showWinTip(e, w) {
+    if (!w) return;
+    const hm = (iso) => iso.slice(11, 16);
+    const what = w.kind === "charge" ? `Charge slot ${w.slot}` : `Discharge slot ${w.slot}`;
+    this._tip.innerHTML = `<b>${what}</b> · ${hm(w.start)}–${hm(w.end)}<br>
+      ${w.enabled ? `${w.kind === "charge" ? "Charge" : "Discharge"} to <b>${w.target_soc}%</b>` : "Off"}
+      · expected ${Math.round(w.projected_soc)}% at start<br>${esc(w.reason)}`;
+    this._placeTip(e);
+  }
+
   _showTip(e, start) {
     const row = (this._forecast || []).find((r) => r.start === start);
     if (!row) return;
     const s = toMin(start.slice(11, 16)), per = this._guessPeriod();
     this._tip.innerHTML = `<b>${toHHMM(s)}–${toHHMM((s + per) % 1440)}</b> · ${row.kwh.toFixed(2)} kWh<br>
-      Outdoor ${row.t_out}°C · COP ${row.cop}<br>Indoor ${row.t_in}°C (target ${row.t_target}°C)${row.shortfall_k > 0.05 ? `<br><span class="err">Short by ${row.shortfall_k} K</span>` : ""}`;
-    const box = this.shadowRoot.querySelector(".wrap").getBoundingClientRect();
-    this._tip.style.display = "block";
-    const x = e.clientX - box.left + 12;
-    this._tip.style.left = `${Math.min(x, box.width - this._tip.offsetWidth - 4)}px`;
-    this._tip.style.top = `${e.clientY - box.top + 12}px`;
+      Outdoor ${row.t_out}°C · COP ${row.cop}<br>Indoor ${row.t_in}°C (target ${row.t_target}°C)${row.shortfall_k > 0.05 ? `<br><span class="err">Short by ${row.shortfall_k} K</span>` : ""}${this._batteryAt(start)}`;
+    this._placeTip(e);
   }
 
   _renderTable() {

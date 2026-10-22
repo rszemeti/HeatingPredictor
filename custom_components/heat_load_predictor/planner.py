@@ -278,10 +278,12 @@ def _step(
     only the excess charges the battery.
     """
     cap = p.capacity_kwh
-    if action and action[0] == "charge" and soc < action[1]:
-        # Grid charging: loads come from the grid, battery takes charge + spare solar.
-        add = min(p.charge_power_kw * dt_h, (action[1] - soc) / 100 * cap)
-        soc += add / cap * 100
+    if action and action[0] == "charge":
+        # Timed charge slot: the house runs from the grid for the whole window,
+        # the battery charges to target and then holds; spare solar still goes in.
+        if soc < action[1]:
+            add = min(p.charge_power_kw * dt_h, (action[1] - soc) / 100 * cap)
+            soc += add / cap * 100
         spare = max(0.0, pv - load)
         return min(100.0, soc + spare / cap * 100)
     if action and action[0] == "discharge" and soc > action[1]:

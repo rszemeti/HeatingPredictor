@@ -45,6 +45,8 @@ title: Heating schedule
 # temp_step: 0.5       # °C; dragging snaps to this (hold Shift for 0.1)
 # y_min: 14            # temperature axis range (it widens to fit your points)
 # y_max: 24
+# show_battery: true  # battery windows and projected SOC (needs the battery planner)
+# show_solar: true    # solar forecast bars, on their own scale
 ```
 
 - **Edit points:** drag a point to move it, click empty space to add one, and double-click (or right-click) a point to delete it. The table under the chart gives exact times and temperatures.
@@ -181,6 +183,12 @@ The defaults suit Cosy Octopus (cheap 04:00-07:00, 13:00-16:00, 22:00-00:00). So
 |---|---|
 | `…_battery_plan` | State is a summary such as "Charge to 45% at 04:00". The `slots` attribute holds the next occurrence of each window, keyed `charge_1`, `charge_2`, … and `discharge_1`, each with `start`, `end`, `enabled`, `target_soc`, `projected_soc` and a plain-English `reason`. `windows` lists every planned window, and `soc_forecast` the projected SOC per period. |
 | `…_battery_lowest_soc_next_24h` | Lowest projected SOC over the next 24 hours, which is useful for alerts. |
+
+### On the card
+
+With the planner on, the schedule card also shows the plan for each day. Charge windows are shaded green and discharge windows amber, labelled with their target (for example ▲ 45 %) or "off". The projected battery SOC is drawn on its own 0–100 % axis, and the solar forecast appears as faint bars on their own scale. Hover a window label to see why the plan chose it, or a bar to see that period's solar and projected battery level.
+
+![Battery plan on the card](docs/card-battery.png)
 
 ### Applying the plan to your inverter
 

@@ -138,3 +138,16 @@ def test_window_in_progress_uses_current_soc():
     m = find(plan, "charge", datetime(2026, 1, 15, 4, tzinfo=LON))
     assert m.projected_soc == 30
     assert m.enabled
+
+
+def test_battery_holds_at_target_through_charge_window():
+    """In a timed charge slot the house runs from the grid; SOC doesn't saw-tooth."""
+    start = datetime(2026, 1, 15, 0, tzinfo=LON)
+    plan, *_ = plan_for(start, heat_kw=2.0, pv_peak=0.0, soc=18,
+                        params=pl.BatteryParams(charge_power_kw=10))
+    m = find(plan, "charge", datetime(2026, 1, 15, 4, tzinfo=LON))
+    assert m.enabled
+    in_window = [v for t, v in plan.soc
+                 if datetime(2026, 1, 15, 4, 30, tzinfo=LON) <= t <= datetime(2026, 1, 15, 7, tzinfo=LON)]
+    assert all(b >= a - 1e-9 for a, b in zip(in_window, in_window[1:])), in_window  # never drains
+    assert abs(in_window[-1] - m.target_soc) < 0.01, in_window                       # ends on target
