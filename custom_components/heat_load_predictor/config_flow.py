@@ -26,6 +26,9 @@ from .const import (
     CONF_RESERVE_SOC,
     CONF_SOC_ENTITY,
     CONF_CHEAP_TOLERANCE,
+    CONF_HOUSE_LOAD,
+    CONF_HP_SINCE,
+    CONF_LEARN_DAYS,
     CONF_LOAD_MARGIN,
     CONF_RATES_TODAY,
     CONF_RATES_TOMORROW,
@@ -132,6 +135,7 @@ def _battery_schema(current: dict[str, Any]) -> vol.Schema:
         (CONF_SOC_ENTITY, {"domain": "sensor"}),
         (CONF_SOLAR_TODAY, {"domain": "sensor"}),
         (CONF_SOLAR_TOMORROW, {"domain": "sensor"}),
+        (CONF_HOUSE_LOAD, {"domain": "sensor"}),
         (CONF_RATES_TODAY, {"domain": "event"}),
         (CONF_RATES_TOMORROW, {"domain": "event"}),
     ):
@@ -141,6 +145,11 @@ def _battery_schema(current: dict[str, Any]) -> vol.Schema:
     fields[vol.Required(CONF_MIN_SOC, default=d[CONF_MIN_SOC])] = _number(0, 99, 1, "%")
     fields[vol.Required(CONF_RESERVE_SOC, default=d[CONF_RESERVE_SOC])] = _number(0, 100, 1, "%")
     fields[vol.Required(CONF_BASELOAD, default=d[CONF_BASELOAD])] = _number(0, 20, 0.05, "kW")
+    fields[vol.Required(CONF_LEARN_DAYS, default=d[CONF_LEARN_DAYS])] = _number(1, 60, 1, "days")
+    since = d.get(CONF_HP_SINCE)
+    fields[vol.Optional(CONF_HP_SINCE, description={"suggested_value": since} if since else None)] = (
+        selector.DateTimeSelector()
+    )
     fields[vol.Required(CONF_EXPORT_LIMIT, default=d[CONF_EXPORT_LIMIT])] = _number(0, 100, 0.01, "kW")
     fields[vol.Required(CONF_CHARGE_KW, default=d[CONF_CHARGE_KW])] = _number(0.1, 100, 0.1, "kW")
     fields[vol.Required(CONF_DISCHARGE_KW, default=d[CONF_DISCHARGE_KW])] = _number(0.1, 100, 0.1, "kW")
@@ -256,4 +265,5 @@ class HeatLoadPredictorOptionsFlow(OptionsFlow):
 
 BATTERY_KEYS = set(BATTERY_DEFAULTS) | {
     CONF_SOC_ENTITY, CONF_SOLAR_TODAY, CONF_SOLAR_TOMORROW, CONF_RATES_TODAY, CONF_RATES_TOMORROW,
+    CONF_HOUSE_LOAD, CONF_HP_SINCE,
 }

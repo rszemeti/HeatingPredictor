@@ -396,3 +396,4 @@ async def test_plan_recommends_storage_mode(hass: HomeAssistant, fake_weather) -
     await _setup(hass, {**OPTIONS, **BATTERY})
     a = hass.states.get("sensor.heat_pump_battery_plan").attributes
     assert a["storage_mode"] == "Self-Use"
+

@@ -87,7 +87,7 @@
           "battery_capacity_kwh": "Usable battery capacity",
           "battery_min_soc": "Minimum SOC",
           "battery_reserve_soc": "Arrive at each cheap window at",
-          "baseload_kw": "Rest of the house (average)",
+          "baseload_kw": "Rest of the house (used until learned)",
           "export_limit_kw": "Export limit",
           "charge_power_kw": "Maximum grid charge rate",
           "discharge_power_kw": "Maximum discharge rate",
@@ -99,7 +99,10 @@
           "load_margin_pct": "Demand safety margin",
           "rates_today_entity": "Tariff rates today (Octopus Energy)",
           "rates_tomorrow_entity": "Tariff rates tomorrow (Octopus Energy)",
-          "cheap_tolerance_pct": "Cheap if within this much of the day's lowest rate"
+          "cheap_tolerance_pct": "Cheap if within this much of the day's lowest rate",
+          "house_load_entity": "House load (to learn the baseload)",
+          "learn_days": "Learn from the last",
+          "heat_pump_since": "Heat pump in use since"
         },
         "data_description": {
           "battery_soc_entity": "A sensor reporting the battery's state of charge in %.",
@@ -107,7 +110,7 @@
           "solar_tomorrow_entity": "Tomorrow's equivalent, so overnight plans can see the next day's solar.",
           "battery_min_soc": "The inverter's lowest allowed SOC. Plans never go below it.",
           "battery_reserve_soc": "Each charge is sized so the battery reaches the next cheap window at this SOC. Set a few % above the minimum to absorb forecast errors.",
-          "baseload_kw": "Average draw of everything except the heat pump.",
+          "baseload_kw": "Average draw of everything except the heat pump, used until there's enough history to learn from (or if no house load sensor is set).",
           "export_limit_kw": "Solar beyond what the house uses and this export limit has to go into the battery or be lost.",
           "cheap_windows": "Daily times, e.g. 04:00-07:00, 13:00-16:00, 22:00-00:00 (Cosy Octopus). Used when no tariff rates are set, and for times the rates don't cover yet. Each window is a charge slot, numbered in order through the day.",
           "discharge_windows": "Daily times to empty the battery ahead of big solar days, e.g. 00:30-05:30. Leave empty to never discharge.",
@@ -117,7 +120,10 @@
           "load_margin_pct": "Charges are sized as if the heat pump and house use this much more than forecast.",
           "rates_today_entity": "The Octopus Energy integration's current day rates event (event.octopus_energy_electricity_…_current_day_rates). When set, cheap windows come from your actual rates.",
           "rates_tomorrow_entity": "The matching next day rates event. Tomorrow's rates are published in the afternoon; until then the fixed windows below are used for tomorrow.",
-          "cheap_tolerance_pct": "Each day's cheapest band: half-hours priced within this percentage of that day's lowest rate become charge windows."
+          "cheap_tolerance_pct": "Each day's cheapest band: half-hours priced within this percentage of that day's lowest rate become charge windows.",
+          "house_load_entity": "A power sensor for the whole house's consumption, heat pump included (e.g. the inverter's house load). The planner learns a half-hourly baseload from its history: measured load minus the heat model's heat pump use, averaged by time of day. Relearned every 6 hours.",
+          "learn_days": "How many days of house load history to learn from (5-minute history is usually kept for 10 days; older days use hourly averages).",
+          "heat_pump_since": "When the heat pump started heating the house. Before this the house load is taken as the baseload as it is; from this point the heat model's heat pump use is subtracted. Leave empty if it has been running throughout the learning period."
         }
       }
     },

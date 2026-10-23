@@ -1,7 +1,7 @@
 """Constants for Heat Load Predictor."""
 
 DOMAIN = "heat_load_predictor"
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR = "indoor_temp_entity"
@@ -73,3 +73,9 @@ CONF_RATES_TOMORROW = "rates_tomorrow_entity"
 CONF_CHEAP_TOLERANCE = "cheap_tolerance_pct"
 BATTERY_DEFAULTS[CONF_CHEAP_TOLERANCE] = 10
 WRITE_LEAD_MINUTES = 10   # update the inverter this long before each window
+
+CONF_HOUSE_LOAD = "house_load_entity"
+CONF_LEARN_DAYS = "learn_days"
+BATTERY_DEFAULTS[CONF_LEARN_DAYS] = 10
+LEARN_EVERY_HOURS = 6
+CONF_HP_SINCE = "heat_pump_since"

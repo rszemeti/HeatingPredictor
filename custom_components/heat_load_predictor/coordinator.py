@@ -32,6 +32,9 @@ from .const import (
     CONF_RESERVE_SOC,
     CONF_SOC_ENTITY,
     CONF_CHEAP_TOLERANCE,
+    CONF_HOUSE_LOAD,
+    CONF_HP_SINCE,
+    CONF_LEARN_DAYS,
     CONF_LOAD_MARGIN,
     CONF_RATES_TODAY,
     CONF_RATES_TOMORROW,
@@ -53,10 +56,12 @@ from .const import (
     DEFAULT_HORIZON,
     DEFAULT_PERIOD,
     DOMAIN,
+    LEARN_EVERY_HOURS,
     SOLAR_CONFIDENCE_FIELD,
     WRITE_LEAD_MINUTES,
     STORAGE_VERSION,
 )
+from .learn import base_profile, half_hour_means, slot_of
 from .planner import BatteryParams, cheap_ranges, make_plan, occurrences, parse_windows
 from .model import (
     HouseParams,
@@ -98,6 +103,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # as the starting point when there's no indoor sensor.
         self._last_tin: list[tuple[datetime, float]] = []
         self._battery_error: str | None = None
+        # Learned baseload: (48 half-hourly kW values, days of data, when).
+        self._profile: tuple[list[float], float, datetime] | None = None
 
     # ---------------------------------------------------------------- schedule
 
@@ -255,6 +262,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             (r.end, r.t_in_end) for r in results
         ]
         data = summarise(results, now_local, self.period, indoor is not None)
+        if self.config_entry.options.get(CONF_BATTERY_ENABLED):
+            await self._async_maybe_learn()
         o = self.config_entry.options
         if o.get(CONF_BATTERY_ENABLED):
             data["battery"] = self._plan_battery(results, now_local)
@@ -296,6 +305,121 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 slots.append((dt_util.as_utc(when), kw))
                 found = True
         return slots, found
+
+    async def _async_maybe_learn(self) -> None:
+        """Relearn the baseload profile if it's missing or stale."""
+        o = self.config_entry.options
+        if not o.get(CONF_HOUSE_LOAD) or "recorder" not in self.hass.config.components:
+            return
+        if self._profile and dt_util.utcnow() - self._profile[2] < timedelta(hours=LEARN_EVERY_HOURS):
+            return
+        try:
+            learned = await self._async_learn_profile()
+        except Exception as err:  # noqa: BLE001 - never let learning break the plan
+            _LOGGER.warning("Couldn't learn the house load profile: %s", err)
+            learned = None
+        if learned:
+            self._profile = (learned[0], learned[1], dt_util.utcnow())
+            p = learned[0]
+            _LOGGER.info(
+                "Learned house baseload from %.1f days of %s: average %.2f kW, "
+                "17:00-19:00 %.2f kW, 02:00-05:00 %.2f kW",
+                learned[1], o[CONF_HOUSE_LOAD], sum(p) / len(p),
+                sum(p[34:38]) / 4, sum(p[4:10]) / 6,
+            )
+
+    async def _async_learn_profile(self) -> tuple[list[float], float] | None:
+        """House load history minus modelled heat pump use, by half-hour of day."""
+        from homeassistant.components.recorder.history import state_changes_during_period
+        from homeassistant.components.recorder.statistics import statistics_during_period
+        from homeassistant.helpers.recorder import get_instance
+
+        o = {**BATTERY_DEFAULTS, **self.config_entry.options}
+        load_id = o[CONF_HOUSE_LOAD]
+        weather_id = o[CONF_WEATHER]
+        end = align_down(dt_util.now(), 30)
+        start = end - timedelta(days=int(o[CONF_LEARN_DAYS]))
+        rec = get_instance(self.hass)
+
+        def fetch(period: str) -> list:
+            rows = statistics_during_period(
+                self.hass, dt_util.as_utc(start), dt_util.as_utc(end), {load_id},
+                period, {"power": "kW"}, {"mean"},
+            )
+            return rows.get(load_id, [])
+
+        five = await rec.async_add_executor_job(fetch, "5minute")
+        hourly = await rec.async_add_executor_job(fetch, "hour")
+        house = half_hour_means(
+            [(dt_util.as_local(dt_util.utc_from_timestamp(r["start"])), r["mean"])
+             for r in five if r.get("mean") is not None],
+            start, end,
+        )
+        # Older half-hours that only have hourly statistics.
+        for r in hourly:
+            if r.get("mean") is None:
+                continue
+            t = dt_util.as_local(dt_util.utc_from_timestamp(r["start"]))
+            for half in (t, t + timedelta(minutes=30)):
+                if start <= half < end:
+                    house.setdefault(half, r["mean"])
+        if not house:
+            return None
+
+        changes = await rec.async_add_executor_job(
+            state_changes_during_period, self.hass, dt_util.as_utc(start), dt_util.as_utc(end),
+            weather_id, False, False, None, True,
+        )
+        unit = self.hass.config.units.temperature_unit
+        temps = []
+        for st in changes.get(weather_id, []):
+            t = st.attributes.get("temperature")
+            if t is None:
+                continue
+            try:
+                temps.append((st.last_updated, _to_c(float(t), st.attributes.get("temperature_unit", unit))))
+            except (TypeError, ValueError):
+                continue
+        since = None
+        if o.get(CONF_HP_SINCE):
+            parsed = dt_util.parse_datetime(str(o[CONF_HP_SINCE]))
+            if parsed is None:
+                d = dt_util.parse_date(str(o[CONF_HP_SINCE]))
+                parsed = datetime(d.year, d.month, d.day) if d else None
+            if parsed is not None:
+                since = dt_util.as_local(
+                    parsed if parsed.tzinfo else parsed.replace(tzinfo=dt_util.get_default_time_zone())
+                )
+
+        heat: dict[datetime, float] = {}
+        if len(temps) >= 2:
+            schedule = self.schedule
+
+            def target(when: datetime) -> float:
+                return schedule_temp(schedule, dt_util.as_local(when))
+
+            start_utc = dt_util.as_utc(start)
+            past = simulate(
+                start=start_utc,
+                periods=int((end - start).total_seconds() // 1800),
+                period_minutes=30,
+                outdoor_temp=forecast_interpolator(temps),
+                target_temp=target,
+                t_in_start=target(start_utc),
+                params=self._params(),
+            )
+            heat = {dt_util.as_local(r.start): r.elec_kwh * 2 for r in past}
+        elif since is None:
+            _LOGGER.info("Not enough outdoor temperature history in %s to learn yet", weather_id)
+            return None
+        return base_profile(house, heat, heat_pump_since=since, min_days=1.0)
+
+    def _baseload_kwh(self, starts: list[datetime], o: dict) -> tuple[list[float], str]:
+        dt_h = self.period / 60
+        if self._profile:
+            prof, days, _ = self._profile
+            return [prof[slot_of(t)] * dt_h for t in starts], f"learned from {days:.1f} days"
+        return [float(o[CONF_BASELOAD]) * dt_h for _ in starts], f"fixed {float(o[CONF_BASELOAD]):.2f} kW"
 
     def _rates(self) -> list[tuple[datetime, datetime, float]]:
         """(start, end, price) periods from Octopus Energy rate event entities."""
@@ -353,7 +477,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         dt_h = self.period / 60
         starts = [dt_util.as_local(r.start) for r in results]
-        load = [r.elec_kwh + float(o[CONF_BASELOAD]) * dt_h for r in results]
+        base, base_source = self._baseload_kwh(starts, o)
+        load = [r.elec_kwh + b for r, b in zip(results, base)]
         utc_starts = [dt_util.as_utc(t) for t in starts]
         slots, solar_ok = self._solar_slots()
         pv = solar_per_period(utc_starts, self.period, slots)
@@ -419,6 +544,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "summary": summary,
             "storage_mode": storage_mode,
             "charge_windows_from": charge_source,
+            "baseload_from": base_source,
+            "baseload_profile": [round(v, 3) for v in self._profile[0]] if self._profile else None,
             "next_write": next_write.isoformat() if next_write else None,
             "next_write_slots": next_write_slots,
             "self_use_from": self_use_from,
