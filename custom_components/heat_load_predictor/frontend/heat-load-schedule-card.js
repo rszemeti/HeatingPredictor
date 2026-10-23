@@ -313,9 +313,12 @@ class HeatLoadScheduleCard extends HTMLElement {
     r.querySelectorAll("[data-interp]").forEach((b) => (b.onclick = () => { this._schedule.interpolation = b.dataset.interp; this._render(); }));
 
     const dates = this._datesByWeekday();
-    r.querySelector(".tabs").innerHTML = DAY_NAMES.map((n, i) =>
-      `<button class="tab ${i === this._day ? "on" : ""}" data-day="${i}">${n}${dates[i] ? `<small>${Number(dates[i].slice(8))}</small>` : ""}</button>`
-    ).join("");
+    // Tabs run from today: today, tomorrow, ... six days on.
+    const first = (new Date().getDay() + 6) % 7;
+    r.querySelector(".tabs").innerHTML = [0, 1, 2, 3, 4, 5, 6].map((k) => {
+      const i = (first + k) % 7, n = DAY_NAMES[i];
+      return `<button class="tab ${i === this._day ? "on" : ""}" data-day="${i}">${n}${dates[i] ? `<small>${Number(dates[i].slice(8))}</small>` : ""}</button>`;
+    }).join("");
     r.querySelectorAll("[data-day]").forEach((b) => (b.onclick = () => { this._day = Number(b.dataset.day); this._render(); }));
 
     r.querySelector(".copy").innerHTML = `<span class="hint">Copy ${DAY_NAMES[this._day]} to:</span>
