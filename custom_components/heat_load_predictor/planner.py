@@ -155,6 +155,9 @@ class BatteryParams:
     discharge_threshold_soc: float = 80.0
     solar_headroom_kwh: float = 2.6
     load_margin_pct: float = 10.0   # charge sizing: assume load this much higher
+    # True: fill every cheap window as far as the next day's solar allows.
+    # False: charge only what the forecast says is needed to reach the next one.
+    fill_cheap_windows: bool = True
 
     def __post_init__(self) -> None:
         if self.capacity_kwh <= 0:
@@ -327,9 +330,33 @@ def make_plan(
         upper = 100 - (room + (params.solar_headroom_kwh if room > 0 else 0)) / cap * 100
         overlaps = any(s < o.end and o.start < e for s, e in discharging)
         skip_low = lowest(None)
+        fill_to = int(max(params.min_soc, min(100, math.ceil(upper))))
         if overlaps:
-            target = int(max(params.min_soc, min(100, math.ceil(upper))))
+            target = fill_to
             enabled, reason = False, "overnight discharge is making room for solar"
+        elif params.fill_cheap_windows:
+            # Cheap power is the cheapest there is: fill as far as tomorrow's
+            # solar allows, rather than gambling on just scraping through.
+            just_enough = _lowest_target(lowest, projected, params)
+            if fill_to > projected + 0.5:
+                target, enabled = fill_to, True
+                reason = f"fill to {target}% on cheap power"
+                if fill_to < 100:
+                    reason += f" (the rest is room for {room:.1f} kWh of solar)"
+                if lowest(target) < params.reserve_soc - 1e-6:
+                    reason += (" (charge rate too low to cover it all)" if target >= 100
+                               else f"; {just_enough}% would be needed to stay above "
+                                    f"{params.reserve_soc:.0f}% until the next cheap window")
+            elif just_enough is not None:
+                # Already at the solar limit but still short: run the house on
+                # cheap grid power during the window and keep what's stored.
+                target, enabled = int(max(params.min_soc, math.ceil(projected))), True
+                reason = (f"hold at {target}%: run the house on cheap power now, "
+                          f"keep the battery for {need:.1f} kWh after the window")
+            else:
+                target, enabled = fill_to, False
+                reason = (f"battery expected at {projected:.0f}%, already as full as "
+                          f"tomorrow's solar allows")
         elif skip_low >= params.reserve_soc - 1e-6:
             target = int(max(params.min_soc, math.ceil(projected)))
             enabled = False
@@ -376,6 +403,23 @@ def make_plan(
         soc=[(starts[i] + dt, soc[i + 1]) for i in range(n)],
         modes=list(zip(starts, modes)),
     )
+
+
+def _lowest_target(lowest, projected: float, p: BatteryParams) -> int | None:
+    """Smallest whole-% charge target that keeps the battery above the reserve
+    until the next cheap window, or None if skipping the window already does."""
+    if lowest(None) >= p.reserve_soc - 1e-6:
+        return None
+    lo, hi = max(int(math.ceil(projected)), int(p.min_soc)), 100
+    if lowest(hi) < p.reserve_soc - 1e-6:
+        return hi
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if lowest(mid) >= p.reserve_soc - 1e-6:
+            hi = mid
+        else:
+            lo = mid + 1
+    return hi
 
 
 def _step(

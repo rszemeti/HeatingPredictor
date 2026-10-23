@@ -1,7 +1,7 @@
 """Constants for Heat Load Predictor."""
 
 DOMAIN = "heat_load_predictor"
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR = "indoor_temp_entity"
@@ -67,6 +67,8 @@ SOLAR_CONFIDENCE_FIELD = {
 }
 BATTERY_DEFAULTS[CONF_SOLAR_CONFIDENCE] = "pessimistic"
 BATTERY_DEFAULTS[CONF_LOAD_MARGIN] = 10
+CONF_CHARGE_STRATEGY = "charge_strategy"   # "fill" or "minimum"
+BATTERY_DEFAULTS[CONF_CHARGE_STRATEGY] = "fill"
 
 CONF_RATES_TODAY = "rates_today_entity"
 CONF_RATES_TOMORROW = "rates_tomorrow_entity"

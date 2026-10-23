@@ -36,6 +36,7 @@ from .const import (
     CONF_HP_SINCE,
     CONF_LEARN_DAYS,
     CONF_LOAD_MARGIN,
+    CONF_CHARGE_STRATEGY,
     CONF_RATES_TODAY,
     CONF_RATES_TOMORROW,
     CONF_SOLAR_CONFIDENCE,
@@ -498,6 +499,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             discharge_threshold_soc=float(o[CONF_DISCHARGE_THRESHOLD]),
             solar_headroom_kwh=float(o[CONF_SOLAR_HEADROOM]),
             load_margin_pct=float(o[CONF_LOAD_MARGIN]),
+            fill_cheap_windows=o.get(CONF_CHARGE_STRATEGY, "fill") != "minimum",
         )
         plan = make_plan(
             starts=starts,

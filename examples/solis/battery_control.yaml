@@ -4,7 +4,9 @@ description: >
   battery plan. Three jobs, chosen by trigger:
   1. Apply plan - at the plan's "next inverter update" time (shortly before each
      window, wherever the tariff puts it) copy each window due in the next 20
-     minutes into its Solis slot: times, target SOC and on/off. If the plan is
+     minutes into its Solis slot: times, target SOC and on/off. Every 5 minutes,
+     if the plan for a charge window that's already running has changed, write
+     it again. If the plan is
      unavailable, fixed Cosy-time triggers keep discharge off and charge to 80%.
   2. Stop discharge at target - every 2 minutes during the discharge window,
      once SOC reaches the target, switch discharge slot 1 off so the inverter
@@ -31,6 +33,9 @@ triggers:
     at: "21:50:00"
     id: fallback_charge_3
   - trigger: time_pattern
+    minutes: /5
+    id: recheck
+  - trigger: time_pattern
     minutes: /2
     id: discharge_check
   - trigger: time_pattern
@@ -51,17 +56,30 @@ actions:
       - alias: Apply plan
         conditions:
           - condition: trigger
-            id: apply
+            id: [apply, recheck]
           - condition: template
             value_template: "{{ plan_ok }}"
         sequence:
           - variables:
-              # Windows starting within the next 20 minutes.
+              # At the update time: windows starting within the next 20 minutes.
+              # Every 5 minutes: a charge window already running whose plan has
+              # changed since it was written (e.g. the house used more than
+              # forecast), so the decision is never stuck for the whole window.
               due: >-
                 {% set ns = namespace(keys=[]) %}
+                {% set mask = states(mask_entity) | int(0) %}
                 {% for key, w in (state_attr(plan_entity, 'slots') or {}).items() %}
                   {% set mins = (as_timestamp(w.start) - as_timestamp(now())) / 60 %}
-                  {% if -1 <= mins <= 20 %}{% set ns.keys = ns.keys + [key] %}{% endif %}
+                  {% set slot = key.split('_')[1] | int %}
+                  {% set sfx = '' if slot == 1 else '_' ~ slot %}
+                  {% set on = mask | bitwise_and(2 ** (slot - 1)) > 0 %}
+                  {% set soc_set = states('number.solis8_timed_charge_soc' ~ sfx) | int(-1) %}
+                  {% set running = key.startswith('charge') and mins <= 0
+                     and as_timestamp(w.end) > as_timestamp(now()) %}
+                  {% set changed = on != w.enabled or (w.enabled and soc_set != w.target_soc | int) %}
+                  {% if (trigger.id == 'apply' and -1 <= mins <= 20) or (running and changed) %}
+                    {% set ns.keys = ns.keys + [key] %}
+                  {% endif %}
                 {% endfor %}
                 {{ ns.keys }}
           - repeat:

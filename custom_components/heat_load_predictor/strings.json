@@ -102,7 +102,8 @@
           "cheap_tolerance_pct": "Cheap if within this much of the day's lowest rate",
           "house_load_entity": "House load (to learn the baseload)",
           "learn_days": "Learn from the last",
-          "heat_pump_since": "Heat pump in use since"
+          "heat_pump_since": "Heat pump in use since",
+          "charge_strategy": "Cheap window charging"
         },
         "data_description": {
           "battery_soc_entity": "A sensor reporting the battery's state of charge in %.",
@@ -123,7 +124,8 @@
           "cheap_tolerance_pct": "Each day's cheapest band: half-hours priced within this percentage of that day's lowest rate become charge windows.",
           "house_load_entity": "A power sensor for the whole house's consumption, heat pump included (e.g. the inverter's house load). The planner learns a half-hourly baseload from its history: measured load minus the heat model's heat pump use, averaged by time of day. Relearned every 6 hours.",
           "learn_days": "How many days of house load history to learn from (5-minute history is usually kept for 10 days; older days use hourly averages).",
-          "heat_pump_since": "When the heat pump started heating the house. Before this the house load is taken as the baseload as it is; from this point the heat model's heat pump use is subtracted. Leave empty if it has been running throughout the learning period."
+          "heat_pump_since": "When the heat pump started heating the house. Before this the house load is taken as the baseload as it is; from this point the heat model's heat pump use is subtracted. Leave empty if it has been running throughout the learning period.",
+          "charge_strategy": "Fill: charge every cheap window as far as the next day's solar allows, so a bad forecast can't leave you buying at full price. Minimum: charge only what the forecast says gets you to the next cheap window above the reserve."
         }
       }
     },
@@ -207,6 +209,12 @@
         "pessimistic": "Pessimistic (10th percentile, recommended)",
         "expected": "Expected (median)",
         "optimistic": "Optimistic (90th percentile)"
+      }
+    },
+    "charge_strategy": {
+      "options": {
+        "fill": "Fill up to the solar limit (recommended)",
+        "minimum": "Only what the forecast needs"
       }
     }
   }

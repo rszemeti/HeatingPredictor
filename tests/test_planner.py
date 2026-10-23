@@ -38,7 +38,7 @@ def plan_for(start, *, heat_kw, base_kw=0.4, pv_peak=0.0, soc=50.0, params=None,
     pv = [bell(t, pv_peak) * 0.5 for t in starts]
     return pl.make_plan(
         starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=soc,
-        params=params or pl.BatteryParams(load_margin_pct=0), charge_windows=COSY, discharge_windows=NIGHT,
+        params=params or pl.BatteryParams(load_margin_pct=0, fill_cheap_windows=False), charge_windows=COSY, discharge_windows=NIGHT,
     ), starts, load, pv
 
 
@@ -165,8 +165,9 @@ def test_cautious_sizing_charges_more_but_projection_stays_expected():
     pv_low = [x * 0.4 for x in pv]
     base = dict(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=40,
                 charge_windows=COSY, discharge_windows=NIGHT)
-    plain = pl.make_plan(**base, params=pl.BatteryParams(load_margin_pct=0))
-    cautious = pl.make_plan(**base, pv_low_kwh=pv_low, params=pl.BatteryParams(load_margin_pct=10))
+    plain = pl.make_plan(**base, params=pl.BatteryParams(load_margin_pct=0, fill_cheap_windows=False))
+    cautious = pl.make_plan(**base, pv_low_kwh=pv_low,
+                            params=pl.BatteryParams(load_margin_pct=10, fill_cheap_windows=False))
     when = datetime(2026, 3, 10, 13, tzinfo=LON)
     a, c = find(plain, "charge", when), find(cautious, "charge", when)
     assert c.target_soc > a.target_soc
@@ -205,7 +206,8 @@ def test_self_use_all_day_when_solar_never_exceeds_export_limit():
 
 def test_big_day_flips_to_self_use_as_early_as_possible_without_clipping():
     start = datetime(2026, 6, 15, 0, tzinfo=LON)
-    params = pl.BatteryParams(discharge_threshold_soc=0)       # isolate day 1: no discharge
+    params = pl.BatteryParams(discharge_threshold_soc=0,        # isolate day 1: no discharge
+                              fill_cheap_windows=False)
     plan, starts, load, pv = plan_for(start, heat_kw=0.0, pv_peak=9.0, soc=40, params=params)
     today = [(t, m) for t, m in plan.modes if t.date() == start.date()]
     flips = [t for (t0, m0), (t, m) in zip(today, today[1:]) if m0 != m]
@@ -266,7 +268,7 @@ def test_plan_from_ranges_matches_plan_from_fixed_windows():
     pv = [bell(t, 2.0) * 0.5 for t in starts]
     rates = _cosy_rates(start) + _cosy_rates(start + timedelta(days=1))
     kw = dict(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=50,
-              params=pl.BatteryParams(), charge_windows=COSY, discharge_windows=NIGHT)
+              params=pl.BatteryParams(fill_cheap_windows=False), charge_windows=COSY, discharge_windows=NIGHT)
     fixed = pl.make_plan(**kw)
     tariff = pl.make_plan(**kw, charge_ranges=pl.cheap_ranges(rates))
     key = lambda p: [(w.kind, w.slot, w.start, w.enabled, w.target_soc) for w in p.windows]
@@ -282,7 +284,7 @@ def test_skipping_a_window_counts_the_window_itself():
     load = [(0.6 + 0.4) * 0.5 for _ in starts]
     pv = [bell(t, 0.3) * 0.5 for t in starts]
     plan = pl.make_plan(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=43,
-                        params=pl.BatteryParams(), charge_windows=COSY, discharge_windows=NIGHT)
+                        params=pl.BatteryParams(fill_cheap_windows=False), charge_windows=COSY, discharge_windows=NIGHT)
     w = find(plan, "charge", datetime(2026, 10, 23, 13, tzinfo=LON))
     assert w.enabled, w.reason
     assert w.target_soc >= 42                      # holds at least the current level
@@ -297,7 +299,7 @@ def test_skip_when_battery_covers_window_and_gap():
     load = [(0.6 + 0.4) * 0.5 for _ in starts]
     pv = [bell(t, 0.3) * 0.5 for t in starts]
     plan = pl.make_plan(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=80,
-                        params=pl.BatteryParams(), charge_windows=COSY, discharge_windows=NIGHT)
+                        params=pl.BatteryParams(fill_cheap_windows=False), charge_windows=COSY, discharge_windows=NIGHT)
     w = find(plan, "charge", datetime(2026, 10, 23, 13, tzinfo=LON))
     assert not w.enabled and "enough" in w.reason
     assert dict(plan.soc)[datetime(2026, 10, 23, 22, tzinfo=LON)] >= 20
@@ -310,8 +312,8 @@ def test_property_never_below_reserve_before_next_window():
     import random
 
     rng = random.Random(1234)
-    p = pl.BatteryParams(load_margin_pct=0)
-    for case in range(200):
+    for case in range(400):
+        p = pl.BatteryParams(load_margin_pct=0, fill_cheap_windows=case % 2 == 0)
         start = datetime(2026, rng.choice([1, 3, 6, 10, 11]), rng.randint(1, 28),
                          rng.randint(0, 23), rng.choice([0, 30]), tzinfo=LON)
         starts = series(start, hours=36)
@@ -343,3 +345,38 @@ def test_property_never_below_reserve_before_next_window():
             if start_soc < p.reserve_soc:
                 continue        # started the window below reserve already; can only recover
             assert low >= p.reserve_soc - 1e-6, (case, start, w0, low)
+
+
+def test_fills_the_late_window_instead_of_scraping_through():
+    """Regression (23-24 Oct): at 21:50 the forecast said the battery would just
+    stay above the reserve until 04:00, so the 22:00-00:00 slot was skipped. The
+    house used more than forecast and the battery hit the floor at 02:30,
+    buying at standard rate. Cheap windows now fill as far as solar allows."""
+    start = datetime(2026, 10, 23, 21, 30, tzinfo=LON)
+    starts = series(start, hours=30)
+    load = [0.45 * 0.5 for _ in starts]        # forecast: 0.45 kW overnight
+    pv = [bell(t, 1.5) * 0.5 for t in starts]  # dull Saturday
+    kw = dict(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=32,
+              charge_windows=COSY, discharge_windows=NIGHT)
+    late = datetime(2026, 10, 23, 22, tzinfo=LON)
+    old = find(pl.make_plan(params=pl.BatteryParams(fill_cheap_windows=False), **kw), "charge", late)
+    assert not old.enabled                     # what happened last night
+    w = find(pl.make_plan(params=pl.BatteryParams(), **kw), "charge", late)
+    assert w.enabled and w.target_soc == 100, w.reason
+    assert "fill" in w.reason
+
+
+def test_fill_leaves_room_for_a_big_solar_day():
+    start = datetime(2026, 6, 20, 21, 30, tzinfo=LON)
+    plan, *_ = plan_for(start, heat_kw=0.0, pv_peak=12.0, soc=30,
+                        params=pl.BatteryParams(load_margin_pct=0), hours=30)
+    w = find(plan, "charge", datetime(2026, 6, 20, 22, tzinfo=LON))
+    assert w.target_soc < 100 and "room" in w.reason or not w.enabled, w.reason
+
+
+def test_fill_skips_when_already_at_solar_limit():
+    start = datetime(2026, 6, 20, 21, 30, tzinfo=LON)
+    plan, *_ = plan_for(start, heat_kw=0.0, pv_peak=12.0, soc=95,
+                        params=pl.BatteryParams(load_margin_pct=0), hours=30)
+    w = find(plan, "charge", datetime(2026, 6, 20, 22, tzinfo=LON))
+    assert not w.enabled, w.reason

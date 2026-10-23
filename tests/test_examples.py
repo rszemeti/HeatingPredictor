@@ -202,7 +202,18 @@ async def test_storage_mode_follows_plan(hass: HomeAssistant, freezer) -> None:
     day = datetime(2026, 6, 15, tzinfo=LON)
     await _rig(hass, freezer, day, soc=50, pv_peak=12.0, temp=16.0)
     for hh, mm in ((7, 0), (9, 0), (13, 30), (17, 0)):
+        # The plan refreshes on its own timer; the automation acts on whichever
+        # plan was current when it fired, so accept the plan either side.
+        before = hass.states.get("sensor.heat_pump_battery_plan").attributes["storage_mode"]
         await _at(hass, freezer, day, hh, mm)
+        after = hass.states.get("sensor.heat_pump_battery_plan").attributes["storage_mode"]
+        state = hass.states.get("select.solis8_energy_storage_control_switch").state
+        assert state in (before, after), (hh, before, after, state)
+        # Ten minutes on the plan has settled; next half-hour it must match.
+        await _at(hass, freezer, day, hh, mm + 10)
+        planned = hass.states.get("sensor.heat_pump_battery_plan").attributes["storage_mode"]
+        await _at(hass, freezer, day, hh, mm + 29)
+        await _at(hass, freezer, day, hh + (mm + 30) // 60, (mm + 30) % 60)
         planned = hass.states.get("sensor.heat_pump_battery_plan").attributes["storage_mode"]
         assert hass.states.get("select.solis8_energy_storage_control_switch").state == planned, (hh, planned)
 
@@ -265,3 +276,25 @@ async def test_windows_follow_octopus_rates(hass: HomeAssistant, freezer) -> Non
     tomorrow = [x for x in hass.states.get("sensor.heat_pump_battery_plan").attributes["windows"]
                 if x["kind"] == "charge" and x["start"].startswith("2026-01-16")]
     assert tomorrow and tomorrow[0]["start"][11:16] == "04:00"
+
+
+async def test_running_charge_window_is_rewritten_when_plan_changes(hass: HomeAssistant, freezer) -> None:
+    """Regression (23-24 Oct): the 22:00 slot was written 'off' at 21:50 and
+    nothing looked at it again. If the plan changes while a charge window is
+    running, the automation writes the new decision within 5 minutes."""
+    day = datetime(2026, 10, 23, tzinfo=LON)
+    calls = await _rig(hass, freezer, day, soc=60, pv_peak=1.0, temp=10.0)
+    await _at(hass, freezer, day, 21, 50)
+    # Pretend the inverter holds a stale 'off' for slot 3 (as 0.3.2 wrote it).
+    hass.states.async_set("number.solis8_timed_charge_discharge_on_off", "0")
+    calls.clear()
+    await _at(hass, freezer, day, 22, 5)
+    w = _slot(hass, "charge_3")
+    assert w["enabled"], w["reason"]
+    written = _written(calls)
+    assert written["number.solis8_timed_charge_discharge_on_off"] & 4
+    assert written["number.solis8_timed_charge_soc_3"] == w["target_soc"]
+    # Once it matches, the recheck leaves the inverter alone.
+    calls.clear()
+    await _at(hass, freezer, day, 22, 10)
+    assert not _written(calls)

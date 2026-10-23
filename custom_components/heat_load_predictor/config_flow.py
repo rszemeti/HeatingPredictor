@@ -30,6 +30,7 @@ from .const import (
     CONF_HP_SINCE,
     CONF_LEARN_DAYS,
     CONF_LOAD_MARGIN,
+    CONF_CHARGE_STRATEGY,
     CONF_RATES_TODAY,
     CONF_RATES_TOMORROW,
     CONF_SOLAR_CONFIDENCE,
@@ -166,6 +167,13 @@ def _battery_schema(current: dict[str, Any]) -> vol.Schema:
         )
     )
     fields[vol.Required(CONF_LOAD_MARGIN, default=d[CONF_LOAD_MARGIN])] = _number(0, 100, 1, "%")
+    fields[vol.Required(CONF_CHARGE_STRATEGY, default=d.get(CONF_CHARGE_STRATEGY, "fill"))] = selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=["fill", "minimum"],
+            translation_key="charge_strategy",
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
     return vol.Schema(fields)
 
 

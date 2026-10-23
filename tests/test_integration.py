@@ -357,9 +357,12 @@ async def test_battery_plan_appears_when_soc_sensor_arrives(hass: HomeAssistant,
     assert st.attributes["soc_now"] == 55
 
 
-async def test_pessimistic_solar_used_for_charge_sizing(hass: HomeAssistant, fake_weather) -> None:
+async def test_pessimistic_solar_used_for_charge_sizing(hass: HomeAssistant, fake_weather, freezer) -> None:
     """With Solcast's pv_estimate10 present, charges are sized on it."""
     import math as _m
+
+    # Midday, so a cheap window comes before the battery could run down.
+    freezer.move_to(dt_util.start_of_local_day() + timedelta(hours=12))
 
     hass.states.async_set("sensor.battery_soc", "30", {"unit_of_measurement": "%"})
     today = dt_util.start_of_local_day()
@@ -377,7 +380,8 @@ async def test_pessimistic_solar_used_for_charge_sizing(hass: HomeAssistant, fak
     for name, day in (("sensor.solcast_today", today), ("sensor.solcast_tomorrow", today + timedelta(days=1))):
         hass.states.async_set(name, "1", {"detailedForecast": slots(day, 0.3)})
 
-    entry = await _setup(hass, {**OPTIONS, **BATTERY, "solar_confidence": "expected", "load_margin_pct": 0})
+    entry = await _setup(hass, {**OPTIONS, **BATTERY, "solar_confidence": "expected", "load_margin_pct": 0,
+                                "charge_strategy": "minimum"})
     a = hass.states.get("sensor.heat_pump_battery_plan").attributes
     expected_1 = a["slots"]["charge_1"]["target_soc"]
     hass.config_entries.async_update_entry(entry, options={**entry.options, "solar_confidence": "pessimistic"})
