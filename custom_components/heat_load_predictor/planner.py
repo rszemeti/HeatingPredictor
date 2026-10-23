@@ -308,20 +308,59 @@ def make_plan(
         # Charge window: cover the gap to the next cheap window's start.
         nxt = next((c for c in charge_occ if c.start >= o.end), None)
         gap_end = idx(nxt.start) if nxt else n
+        # Decide by simulation, period by period, with the cautious solar and
+        # demand: what is the lowest SOC between this window's start and the
+        # next cheap window, if we skip the slot or charge to a given target?
+        gap_start_soc = projected
+
+        def lowest(target: float | None) -> float:
+            s_ = gap_start_soc
+            low = s_
+            for i in range(a, gap_end):
+                act = ("charge", target) if target is not None and i < b else None
+                s_ = _step(s_, act, pv_cautious[i], load_cautious[i], dt_h, params)
+                low = min(low, s_)
+            return low
+
         need = _worst_shortfall(pv_cautious, load_cautious, b, gap_end)
-        lower = params.reserve_soc + need / cap * 100
         room = _room_needed(pv_kwh, load_kwh, b, b + day_periods, dt_h, params)
         upper = 100 - (room + (params.solar_headroom_kwh if room > 0 else 0)) / cap * 100
-        target = int(min(100, max(params.min_soc, math.ceil(min(lower, upper)))))
         overlaps = any(s < o.end and o.start < e for s, e in discharging)
+        skip_low = lowest(None)
         if overlaps:
+            target = int(max(params.min_soc, min(100, math.ceil(upper))))
             enabled, reason = False, "overnight discharge is making room for solar"
-        elif projected >= target - 0.5:
-            enabled, reason = False, f"battery expected at {projected:.0f}%, enough"
+        elif skip_low >= params.reserve_soc - 1e-6:
+            target = int(max(params.min_soc, math.ceil(projected)))
+            enabled = False
+            reason = (f"battery expected at {projected:.0f}%, enough to stay above "
+                      f"{params.reserve_soc:.0f}% until the next cheap window")
         else:
+            # Lowest whole-% target that keeps the battery above the reserve.
+            lo_t, hi_t = max(int(math.ceil(projected)), int(params.min_soc)), 100
+            if lowest(hi_t) < params.reserve_soc - 1e-6:
+                target = hi_t
+                short = True
+            else:
+                while lo_t < hi_t:
+                    mid = (lo_t + hi_t) // 2
+                    if lowest(mid) >= params.reserve_soc - 1e-6:
+                        hi_t = mid
+                    else:
+                        lo_t = mid + 1
+                target, short = hi_t, False
+            capped = target > upper
+            if capped:
+                target = int(max(params.min_soc, math.ceil(upper)))
             enabled = True
-            reason = f"cover {need:.1f} kWh until the next cheap window"
-            if upper < lower:
+            if target > projected + 0.5:
+                reason = f"charge to {target}% to cover {need:.1f} kWh until the next cheap window"
+            else:
+                reason = (f"hold at {target}%: run the house on cheap power now, "
+                          f"keep the battery for {need:.1f} kWh after the window")
+            if short:
+                reason += " (charge rate too low to cover it all)"
+            if capped:
                 reason += f"; capped at {target}% to leave room for solar"
         if nxt is None:
             reason += " (next window beyond forecast)"

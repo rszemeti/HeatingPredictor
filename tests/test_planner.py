@@ -271,3 +271,75 @@ def test_plan_from_ranges_matches_plan_from_fixed_windows():
     tariff = pl.make_plan(**kw, charge_ranges=pl.cheap_ranges(rates))
     key = lambda p: [(w.kind, w.slot, w.start, w.enabled, w.target_soc) for w in p.windows]
     assert key(fixed) == key(tariff)
+
+
+def test_skipping_a_window_counts_the_window_itself():
+    """Regression (23 Oct): battery just above the 16:00-22:00 target at 13:00,
+    dull afternoon. Skipping the slot would leave the battery running the house
+    13:00-16:00 and hit the floor before 22:00. The slot must stay on."""
+    start = datetime(2026, 10, 23, 12, 30, tzinfo=LON)
+    starts = series(start, hours=30)
+    load = [(0.6 + 0.4) * 0.5 for _ in starts]
+    pv = [bell(t, 0.3) * 0.5 for t in starts]
+    plan = pl.make_plan(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=43,
+                        params=pl.BatteryParams(), charge_windows=COSY, discharge_windows=NIGHT)
+    w = find(plan, "charge", datetime(2026, 10, 23, 13, tzinfo=LON))
+    assert w.enabled, w.reason
+    assert w.target_soc >= 42                      # holds at least the current level
+    soc = dict(plan.soc)
+    assert soc[datetime(2026, 10, 23, 22, tzinfo=LON)] >= 20, soc[datetime(2026, 10, 23, 22, tzinfo=LON)]
+    assert min(v for t, v in plan.soc if t <= datetime(2026, 10, 23, 22, tzinfo=LON)) > 20
+
+
+def test_skip_when_battery_covers_window_and_gap():
+    start = datetime(2026, 10, 23, 12, 30, tzinfo=LON)
+    starts = series(start, hours=30)
+    load = [(0.6 + 0.4) * 0.5 for _ in starts]
+    pv = [bell(t, 0.3) * 0.5 for t in starts]
+    plan = pl.make_plan(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=80,
+                        params=pl.BatteryParams(), charge_windows=COSY, discharge_windows=NIGHT)
+    w = find(plan, "charge", datetime(2026, 10, 23, 13, tzinfo=LON))
+    assert not w.enabled and "enough" in w.reason
+    assert dict(plan.soc)[datetime(2026, 10, 23, 22, tzinfo=LON)] >= 20
+
+
+def test_property_never_below_reserve_before_next_window():
+    """Whatever the plan decides, replaying its charge slots with the cautious
+    inputs must keep the battery at or above the reserve until each next cheap
+    window, unless the plan itself says the charge rate can't cover it."""
+    import random
+
+    rng = random.Random(1234)
+    p = pl.BatteryParams(load_margin_pct=0)
+    for case in range(200):
+        start = datetime(2026, rng.choice([1, 3, 6, 10, 11]), rng.randint(1, 28),
+                         rng.randint(0, 23), rng.choice([0, 30]), tzinfo=LON)
+        starts = series(start, hours=36)
+        heat = rng.uniform(0, 2.5)
+        load = [(heat * rng.uniform(0.7, 1.3) + 0.4) * 0.5 for _ in starts]
+        peak = rng.uniform(0, 9)
+        pv = [bell(t, peak) * 0.5 for t in starts]
+        soc0 = rng.uniform(15, 95)
+        plan = pl.make_plan(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=soc0,
+                            params=p, charge_windows=COSY, discharge_windows=pl.parse_windows(""))
+        acts = {}
+        for w in plan.windows:
+            if w.kind == "charge" and w.enabled:
+                for i, t in enumerate(starts):
+                    if w.start <= t < w.end:
+                        acts[i] = ("charge", w.target_soc)
+        charge_starts = sorted(w.start for w in plan.windows if w.kind == "charge")
+        shortish = {w.start for w in plan.windows if "charge rate too low" in w.reason}
+        s, path = soc0, []
+        for i, t in enumerate(starts):
+            s = pl._step(s, acts.get(i), pv[i], load[i], 0.5, p)
+            path.append((t + timedelta(minutes=30), s))
+        # Check each gap from a window's start to the next window's start.
+        for w0, w1 in zip(charge_starts, charge_starts[1:]):
+            if w0 in shortish or w0 < starts[0]:
+                continue
+            low = min(v for t, v in path if w0 < t <= w1)
+            start_soc = next((v for t, v in path if t == w0), soc0)
+            if start_soc < p.reserve_soc:
+                continue        # started the window below reserve already; can only recover
+            assert low >= p.reserve_soc - 1e-6, (case, start, w0, low)

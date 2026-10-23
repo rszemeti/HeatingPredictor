@@ -378,12 +378,16 @@ async def test_pessimistic_solar_used_for_charge_sizing(hass: HomeAssistant, fak
         hass.states.async_set(name, "1", {"detailedForecast": slots(day, 0.3)})
 
     entry = await _setup(hass, {**OPTIONS, **BATTERY, "solar_confidence": "expected", "load_margin_pct": 0})
-    expected = {k: v["target_soc"] for k, v in hass.states.get("sensor.heat_pump_battery_plan").attributes["slots"].items()}
+    a = hass.states.get("sensor.heat_pump_battery_plan").attributes
+    expected_1 = a["slots"]["charge_1"]["target_soc"]
     hass.config_entries.async_update_entry(entry, options={**entry.options, "solar_confidence": "pessimistic"})
     await hass.async_block_till_done()
-    cautious = {k: v["target_soc"] for k, v in hass.states.get("sensor.heat_pump_battery_plan").attributes["slots"].items()}
-    assert all(cautious[k] >= expected[k] for k in expected if k.startswith("charge"))
-    assert any(cautious[k] > expected[k] for k in expected if k.startswith("charge"))
+    a = hass.states.get("sensor.heat_pump_battery_plan").attributes
+    cautious_soc = [r["soc"] for r in a["soc_forecast"]]
+    # Cautious sizing never lets the battery fall below the arrival reserve...
+    assert min(cautious_soc) >= 20 - 0.5, min(cautious_soc)
+    # ...and charges more in the morning window, whose gap relies on solar.
+    assert a["slots"]["charge_1"]["target_soc"] > expected_1
 
 
 async def test_plan_recommends_storage_mode(hass: HomeAssistant, fake_weather) -> None:
