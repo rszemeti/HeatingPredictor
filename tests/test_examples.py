@@ -198,9 +198,19 @@ async def test_discharge_check_ignored_outside_window(hass: HomeAssistant, freez
     assert hass.states.get("number.solis8_timed_charge_discharge_on_off").state == "64"
 
 
-async def test_storage_mode(hass: HomeAssistant, freezer) -> None:
+async def test_storage_mode_follows_plan(hass: HomeAssistant, freezer) -> None:
     day = datetime(2026, 6, 15, tzinfo=LON)
     await _rig(hass, freezer, day, soc=50, pv_peak=12.0, temp=16.0)
+    for hh, mm in ((7, 0), (9, 0), (13, 30), (17, 0)):
+        await _at(hass, freezer, day, hh, mm)
+        planned = hass.states.get("sensor.heat_pump_battery_plan").attributes["storage_mode"]
+        assert hass.states.get("select.solis8_energy_storage_control_switch").state == planned, (hh, planned)
+
+
+async def test_storage_mode_fallback_without_plan(hass: HomeAssistant, freezer) -> None:
+    day = datetime(2026, 6, 15, tzinfo=LON)
+    await _rig(hass, freezer, day, soc=50, pv_peak=12.0, temp=16.0, with_soc=False)
+    hass.states.async_set("sensor.solis8_battery_soc", "50")
     hass.states.async_set("sensor.solcast_pv_forecast_forecast_remaining_today", "30")   # > 16 kWh space
     await _at(hass, freezer, day, 9, 0)
     assert hass.states.get("select.solis8_energy_storage_control_switch").state == "Feed-in priority"

@@ -174,6 +174,7 @@ The planner steps through the forecast period by period: heat pump electricity p
 - **Cheap windows (charge):** charge to the lowest SOC that still reaches the next cheap window at your chosen arrival SOC. This is sized from the deepest dip of the running balance across the gap.
 - **Discharge windows:** discharge to make room for solar the house can neither use nor export (beyond your export limit), plus a safety headroom. If that would only mean discharging to above a threshold (80 % by default), it isn't worth it and the window is skipped.
 - **Solar room wins:** a charge never fills space the solar will need, and a charge window that overlaps an active discharge is switched off.
+- **Storage mode:** the plan recommends Self-Use from the earliest point at which the battery can take all spare solar for the rest of the day without clipping, and Feed-in priority (export first) before that. On ordinary days that means Self-Use all day; on big days it stores as much as it can without losing anything above the export limit. It assumes the overnight discharge window makes room for the next day; without one, two big days in a row can leave the battery full on the second morning.
 - **Sized cautiously:** charges are sized against Solcast's pessimistic forecast (`pv_estimate10`, which it expects to beat on about 9 days in 10) and with the house's demand raised by a margin (10 % by default). The projected SOC on the card uses the expected forecast, so on a typical day you'll see the battery reach each window above the reserve. That gap is the buffer. Each window is re-planned about 10 minutes before it opens, using the battery's actual level, so a disappointing morning is made up in the afternoon window. For a bigger cushion through the evening peak, raise the arrival SOC.
 
 The defaults suit Cosy Octopus (cheap 04:00-07:00, 13:00-16:00, 22:00-00:00). Solar comes from the [Solcast](https://github.com/BJReplay/ha-solcast-solar) integration's `detailedForecast` attribute.
@@ -182,7 +183,7 @@ The defaults suit Cosy Octopus (cheap 04:00-07:00, 13:00-16:00, 22:00-00:00). So
 
 | Entity | Meaning |
 |---|---|
-| `…_battery_plan` | State is a summary such as "Charge to 45% at 04:00". The `slots` attribute holds the next occurrence of each window, keyed `charge_1`, `charge_2`, … and `discharge_1`, each with `start`, `end`, `enabled`, `target_soc`, `projected_soc` and a plain-English `reason`. `windows` lists every planned window, and `soc_forecast` the projected SOC per period. |
+| `…_battery_plan` | State is a summary such as "Charge to 45% at 04:00". `storage_mode` is the recommended mode now and `self_use_from` the time it switches to Self-Use for the rest of today. The `slots` attribute holds the next occurrence of each window, keyed `charge_1`, `charge_2`, … and `discharge_1`, each with `start`, `end`, `enabled`, `target_soc`, `projected_soc` and a plain-English `reason`. `windows` lists every planned window, and `soc_forecast` the projected SOC per period. |
 | `…_battery_lowest_soc_next_24h` | Lowest projected SOC over the next 24 hours, which is useful for alerts. |
 
 ### On the card
@@ -197,7 +198,7 @@ The integration only plans. One automation, [`examples/solis/battery_control.yam
 
 - **Apply the plan.** Just before each window it writes the slot's times, target and on/off: discharge slot 1 at 00:25, charge slots 1-3 at 03:50, 12:50 and 21:50. If the plan is unavailable, discharge stays off and charging falls back to 80 %.
 - **Stop discharging at the target.** During the discharge window it switches the slot off once the battery reaches its target, so the inverter doesn't import from the grid to hold that level.
-- **Choose the storage mode.** Every 30 minutes it selects Feed-in priority when the day's remaining solar won't fit in the battery, otherwise Self-Use, with grid charging allowed in both. Check that the inverter's force-charge SOC is below your minimum SOC, or Self-Use will top the battery up from the grid whenever it reaches the floor.
+- **Set the storage mode.** Every 30 minutes it sets the mode the plan recommends (`storage_mode` on the plan sensor), with grid charging allowed in both. If the plan is unavailable, it falls back to comparing the remaining solar forecast with the battery's free space. Check that the inverter's force-charge SOC is below your minimum SOC, or Self-Use will top the battery up from the grid whenever it reaches the floor.
 
 For other inverters, read the same `slots` attribute and write the equivalent settings.
 

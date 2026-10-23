@@ -165,7 +165,9 @@ class BatteryPlanSensor(_BatteryBase):
         plan = self._plan
         if not plan:
             return None
-        return {k: plan[k] for k in ("soc_now", "solar_forecast", "next", "slots", "windows", "soc_forecast")}
+        return {k: plan[k] for k in (
+            "soc_now", "solar_forecast", "storage_mode", "self_use_from",
+            "next", "slots", "windows", "soc_forecast")}
 
 
 class BatteryMinSocSensor(_BatteryBase):

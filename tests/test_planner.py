@@ -173,3 +173,58 @@ def test_cautious_sizing_charges_more_but_projection_stays_expected():
     # Expected path: the cautious plan reaches the 22:00 window with a buffer.
     t22 = datetime(2026, 3, 10, 22, tzinfo=LON)
     assert dict(cautious.soc)[t22] > dict(plain.soc)[t22] + 5
+
+
+def _replay_lost(plan, starts, load, pv, soc0, p, periods=48):
+    """Replay the plan's modes over the first day; return (kWh clipped, SOC path)."""
+    cap, dt_h, lost, s = p.capacity_kwh, 0.5, 0.0, soc0
+    modes = dict(plan.modes)
+    path = []
+    for i, t in enumerate(starts[:periods]):
+        spare = pv[i] - load[i]
+        if spare > 0:
+            room = (100 - s) / 100 * cap
+            if modes[t] == "Feed-in priority":
+                to_batt = min(room, max(0.0, spare - p.export_limit_kw * dt_h))
+                lost += max(0.0, spare - p.export_limit_kw * dt_h - to_batt)
+            else:
+                to_batt = min(room, spare)
+                lost += max(0.0, spare - to_batt - p.export_limit_kw * dt_h)
+            s += to_batt / cap * 100
+        else:
+            s = max(p.min_soc, s + spare / cap * 100)
+        path.append(s)
+    return lost, path
+
+
+def test_self_use_all_day_when_solar_never_exceeds_export_limit():
+    start = datetime(2026, 1, 15, 0, tzinfo=LON)
+    plan, *_ = plan_for(start, heat_kw=1.0, pv_peak=3.0, soc=50)
+    assert {m for t, m in plan.modes if t.date() == start.date()} == {"Self-Use"}
+
+
+def test_big_day_flips_to_self_use_as_early_as_possible_without_clipping():
+    start = datetime(2026, 6, 15, 0, tzinfo=LON)
+    params = pl.BatteryParams(discharge_threshold_soc=0)       # isolate day 1: no discharge
+    plan, starts, load, pv = plan_for(start, heat_kw=0.0, pv_peak=9.0, soc=40, params=params)
+    today = [(t, m) for t, m in plan.modes if t.date() == start.date()]
+    flips = [t for (t0, m0), (t, m) in zip(today, today[1:]) if m0 != m]
+    assert len(flips) == 1 and dict(today)[flips[0]] == "Self-Use", flips
+    assert 8 <= flips[0].hour <= 14
+    lost, path = _replay_lost(plan, starts, load, pv, 40, params)
+    assert lost < 0.2, lost                      # no clipping
+    # Flipping any earlier would clip.
+    early = pl.Plan(windows=plan.windows, soc=plan.soc,
+                    modes=[(t, "Self-Use" if t >= flips[0] - timedelta(hours=1) else m) for t, m in plan.modes])
+    lost_early, _ = _replay_lost(early, starts, load, pv, 40, params)
+    assert lost_early > lost + 0.2
+    # And it stores more than the old "fill just in time" rule would have.
+    old_modes = []
+    s = 40.0
+    for i, t in enumerate(starts):
+        left = sum(pv[j] for j in range(i, len(starts)) if starts[j].date() == t.date())
+        old_modes.append((t, "Feed-in priority" if left > (100 - s) / 100 * 32 else "Self-Use"))
+        s = pl._step(s, None, pv[i], load[i], 0.5, params, old_modes[-1][1] != "Self-Use")
+    _, old_path = _replay_lost(pl.Plan(modes=old_modes), starts, load, pv, 40, params)
+    i17 = starts.index(datetime(2026, 6, 15, 17, tzinfo=LON))
+    assert path[i17] >= old_path[i17] - 0.5

@@ -151,6 +151,10 @@ class WindowPlan:
 class Plan:
     windows: list[WindowPlan] = field(default_factory=list)
     soc: list[tuple[datetime, float]] = field(default_factory=list)  # at each period end
+    # Recommended storage mode for each period: "Self-Use" from the earliest
+    # point at which the battery can take all spare solar without clipping,
+    # "Feed-in priority" (export first) before that.
+    modes: list[tuple[datetime, str]] = field(default_factory=list)
 
 
 def make_plan(
@@ -201,18 +205,26 @@ def make_plan(
     actions: list[tuple[str, float] | None] = [None] * n
     plans: list[WindowPlan] = []
 
-    # Solar still to come today from each period on, for the feed-in rule.
-    pv_left = [0.0] * n
-    for i in range(n - 1, -1, -1):
-        same_day = i + 1 < n and starts[i + 1].date() == starts[i].date()
-        pv_left[i] = pv_kwh[i] + (pv_left[i + 1] if same_day else 0.0)
+    # End (exclusive) of each period's local day, for the storage-mode rule.
+    day_end = [n] * n
+    for i in range(n - 2, -1, -1):
+        day_end[i] = day_end[i + 1] if starts[i + 1].date() == starts[i].date() else i + 1
+
+    def self_use_safe(i: int, soc: float) -> bool:
+        """Can the battery take all spare solar from period i without clipping?"""
+        return _self_use_clipping(
+            pv_kwh, load_kwh, i, day_end[i], soc, dt_h, params
+        ) < CLIP_TOLERANCE_KWH
+
+    modes: list[str] = ["Self-Use"] * n
 
     def simulate(upto: int) -> list[float]:
         """SOC at the start of each period 0..upto (inclusive)."""
         soc = [soc_now]
         s = soc_now
         for i in range(upto):
-            feed_in = pv_left[i] > (100 - s) / 100 * cap
+            feed_in = not self_use_safe(i, s)
+            modes[i] = "Feed-in priority" if feed_in else "Self-Use"
             s = _step(s, actions[i], pv_kwh[i], load_kwh[i], dt_h, params, feed_in)
             soc.append(s)
         return soc
@@ -272,7 +284,11 @@ def make_plan(
                 actions[i] = ("charge", target)
 
     soc = simulate(n)
-    return Plan(windows=plans, soc=[(starts[i] + dt, soc[i + 1]) for i in range(n)])
+    return Plan(
+        windows=plans,
+        soc=[(starts[i] + dt, soc[i + 1]) for i in range(n)],
+        modes=list(zip(starts, modes)),
+    )
 
 
 def _step(
@@ -281,9 +297,8 @@ def _step(
 ) -> float:
     """Advance SOC by one period.
 
-    `feed_in` mirrors the usual storage-mode rule: when today's remaining solar
-    won't fit in the battery, export comes first (up to the export limit) and
-    only the excess charges the battery.
+    `feed_in` is Feed-in priority: export comes first (up to the export limit)
+    and only the excess charges the battery.
     """
     cap = p.capacity_kwh
     if action and action[0] == "charge":
@@ -304,6 +319,33 @@ def _step(
             net = max(0.0, net - p.export_limit_kw * dt_h)
         return min(100.0, soc + net / cap * 100)
     return max(p.min_soc, soc + net / cap * 100) if soc > p.min_soc else soc
+
+
+CLIP_TOLERANCE_KWH = 0.1
+
+
+def _self_use_clipping(
+    pv, load, a: int, b: int, soc: float, dt_h: float, p: BatteryParams
+) -> float:
+    """Solar lost over [a, b) if the battery takes all spare solar from a.
+
+    In Self-Use the battery takes every spare kWh until it's full; after that
+    spare solar is exported, and anything above the export limit is lost.
+    Shortfalls draw the battery down (to its minimum), making room again.
+    """
+    cap = p.capacity_kwh
+    stored = soc / 100 * cap
+    floor = p.min_soc / 100 * cap
+    lost = 0.0
+    for i in range(a, min(b, len(pv))):
+        spare = pv[i] - load[i]
+        if spare >= 0:
+            take = min(spare, cap - stored)
+            stored += take
+            lost += max(0.0, spare - take - p.export_limit_kw * dt_h)
+        else:
+            stored = max(floor, stored + spare) if stored > floor else stored
+    return lost
 
 
 def _worst_shortfall(pv, load, a: int, b: int) -> float:

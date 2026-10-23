@@ -359,8 +359,18 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             summary = "No charging needed"
         socs = [v for _, v in plan.soc]
+        modes = plan.modes
+        storage_mode = modes[0][1] if modes else "Self-Use"
+        today = now_local.date()
+        self_use_from = next(
+            (t.isoformat() for t, m in modes if t.date() == today and m == "Self-Use"
+             and all(m2 == "Self-Use" for t2, m2 in modes if t <= t2 and t2.date() == today)),
+            None,
+        )
         return {
             "summary": summary,
+            "storage_mode": storage_mode,
+            "self_use_from": self_use_from,
             "soc_now": soc_now,
             "solar_forecast": solar_ok,
             "windows": windows,

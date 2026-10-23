@@ -9,8 +9,9 @@ description: >
   2. Stop discharge at target - every 2 minutes during the discharge window,
      once SOC reaches the target, switch discharge slot 1 off so the inverter
      doesn't import from the grid to hold that level.
-  3. Storage mode - every 30 minutes choose Feed-in priority (export first)
-     when today's remaining solar won't fit in the battery, otherwise Self-Use.
+  3. Storage mode - every 30 minutes set the mode the plan recommends:
+     Self-Use from the earliest point at which the battery can take all spare
+     solar without clipping later, Feed-in priority (export first) before that.
   Adjust the entity names in the variables to suit your installation.
 triggers:
   - trigger: time
@@ -141,14 +142,18 @@ actions:
         conditions:
           - condition: trigger
             id: storage_mode
-          - condition: template
-            value_template: >-
-              {{ states(soc_entity) | is_number and states(solar_remaining_entity) | is_number }}
         sequence:
           - variables:
-              space_kwh: "{{ (100 - states(soc_entity) | float) / 100 * battery_kwh }}"
+              # The plan picks Self-Use from the earliest point at which the
+              # battery can take all spare solar without clipping later.
+              # If the plan is unavailable, fall back to a simple comparison.
+              planned: "{{ state_attr(plan_entity, 'storage_mode') }}"
+              space_kwh: "{{ (100 - states(soc_entity) | float(50)) / 100 * battery_kwh }}"
               new_mode: >-
-                {{ 'Feed-in priority' if states(solar_remaining_entity) | float > space_kwh else 'Self-Use' }}
+                {% if planned in ['Self-Use', 'Feed-in priority'] %}{{ planned }}
+                {% elif states(solar_remaining_entity) | is_number
+                       and states(solar_remaining_entity) | float > space_kwh %}Feed-in priority
+                {% else %}Self-Use{% endif %}
           - if:
               - condition: template
                 value_template: "{{ states(mode_entity) != new_mode }}"

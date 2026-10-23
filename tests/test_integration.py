@@ -384,3 +384,11 @@ async def test_pessimistic_solar_used_for_charge_sizing(hass: HomeAssistant, fak
     cautious = {k: v["target_soc"] for k, v in hass.states.get("sensor.heat_pump_battery_plan").attributes["slots"].items()}
     assert all(cautious[k] >= expected[k] for k in expected if k.startswith("charge"))
     assert any(cautious[k] > expected[k] for k in expected if k.startswith("charge"))
+
+
+async def test_plan_recommends_storage_mode(hass: HomeAssistant, fake_weather) -> None:
+    hass.states.async_set("sensor.battery_soc", "40", {"unit_of_measurement": "%"})
+    _solcast(hass, 1.5)                      # small solar: never above the export limit
+    await _setup(hass, {**OPTIONS, **BATTERY})
+    a = hass.states.get("sensor.heat_pump_battery_plan").attributes
+    assert a["storage_mode"] == "Self-Use"
