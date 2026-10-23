@@ -110,6 +110,7 @@ class BatteryParams:
     discharge_power_kw: float = 5.0
     discharge_threshold_soc: float = 80.0
     solar_headroom_kwh: float = 2.6
+    load_margin_pct: float = 10.0   # charge sizing: assume load this much higher
 
     def __post_init__(self) -> None:
         if self.capacity_kwh <= 0:
@@ -158,6 +159,7 @@ def make_plan(
     period_minutes: int,
     load_kwh: Sequence[float],
     pv_kwh: Sequence[float],
+    pv_low_kwh: Sequence[float] | None = None,
     soc_now: float,
     params: BatteryParams,
     charge_windows: Sequence[tuple[time, time]],
@@ -166,7 +168,11 @@ def make_plan(
     """Plan charge and discharge windows across the forecast periods.
 
     `starts` are timezone-aware local period starts; `load_kwh` and `pv_kwh`
-    hold each period's energy.
+    hold each period's expected energy. Charges are sized cautiously: against
+    `pv_low_kwh` (a pessimistic solar forecast, if given) and the load raised
+    by `params.load_margin_pct`. The projected SOC and the solar room use the
+    expected figures, so the projection shows the likely path and the gap
+    above the reserve is the safety buffer.
     """
     n = len(starts)
     if n == 0:
@@ -182,6 +188,8 @@ def make_plan(
     charge_occ = [o for o in occ if o.kind == "charge"]
 
     day_periods = int(24 * 60 / period_minutes)
+    pv_cautious = list(pv_low_kwh) if pv_low_kwh is not None else list(pv_kwh)
+    load_cautious = [x * (1 + params.load_margin_pct / 100) for x in load_kwh]
 
     def idx(when: datetime) -> int:
         """Index of the first period starting at or after `when` (clamped)."""
@@ -240,7 +248,7 @@ def make_plan(
         # Charge window: cover the gap to the next cheap window's start.
         nxt = next((c for c in charge_occ if c.start >= o.end), None)
         gap_end = idx(nxt.start) if nxt else n
-        need = _worst_shortfall(pv_kwh, load_kwh, b, gap_end)
+        need = _worst_shortfall(pv_cautious, load_cautious, b, gap_end)
         lower = params.reserve_soc + need / cap * 100
         room = _room_needed(pv_kwh, load_kwh, b, b + day_periods, dt_h, params)
         upper = 100 - (room + (params.solar_headroom_kwh if room > 0 else 0)) / cap * 100

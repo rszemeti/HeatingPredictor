@@ -25,6 +25,8 @@ from .const import (
     CONF_MIN_SOC,
     CONF_RESERVE_SOC,
     CONF_SOC_ENTITY,
+    CONF_LOAD_MARGIN,
+    CONF_SOLAR_CONFIDENCE,
     CONF_SOLAR_HEADROOM,
     CONF_SOLAR_TODAY,
     CONF_SOLAR_TOMORROW,
@@ -141,6 +143,14 @@ def _battery_schema(current: dict[str, Any]) -> vol.Schema:
     fields[vol.Optional(CONF_DISCHARGE_WINDOWS, default=d[CONF_DISCHARGE_WINDOWS])] = selector.TextSelector()
     fields[vol.Required(CONF_DISCHARGE_THRESHOLD, default=d[CONF_DISCHARGE_THRESHOLD])] = _number(0, 100, 1, "%")
     fields[vol.Required(CONF_SOLAR_HEADROOM, default=d[CONF_SOLAR_HEADROOM])] = _number(0, 100, 0.1, "kWh")
+    fields[vol.Required(CONF_SOLAR_CONFIDENCE, default=d[CONF_SOLAR_CONFIDENCE])] = selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=["pessimistic", "expected", "optimistic"],
+            translation_key="solar_confidence",
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
+    fields[vol.Required(CONF_LOAD_MARGIN, default=d[CONF_LOAD_MARGIN])] = _number(0, 100, 1, "%")
     return vol.Schema(fields)
 
 

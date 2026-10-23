@@ -31,6 +31,8 @@ from .const import (
     CONF_MIN_SOC,
     CONF_RESERVE_SOC,
     CONF_SOC_ENTITY,
+    CONF_LOAD_MARGIN,
+    CONF_SOLAR_CONFIDENCE,
     CONF_SOLAR_HEADROOM,
     CONF_SOLAR_TODAY,
     CONF_SOLAR_TOMORROW,
@@ -48,6 +50,7 @@ from .const import (
     DEFAULT_HORIZON,
     DEFAULT_PERIOD,
     DOMAIN,
+    SOLAR_CONFIDENCE_FIELD,
     STORAGE_VERSION,
 )
 from .planner import BatteryParams, make_plan, parse_windows
@@ -266,8 +269,11 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     # ---------------------------------------------------------------- battery
 
-    def _solar_slots(self) -> tuple[list[tuple[datetime, float]], bool]:
-        """Solcast-style half-hour slots (start, kW) from today/tomorrow sensors."""
+    def _solar_slots(self, field: str = "pv_estimate") -> tuple[list[tuple[datetime, float]], bool]:
+        """Solcast-style half-hour slots (start, kW) from today/tomorrow sensors.
+
+        `field` picks the estimate; if a slot lacks it, the median is used.
+        """
         slots: list[tuple[datetime, float]] = []
         found = False
         for key in (CONF_SOLAR_TODAY, CONF_SOLAR_TOMORROW):
@@ -280,7 +286,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if when is None:
                     continue
                 try:
-                    kw = float(item.get("pv_estimate", 0) or 0)
+                    kw = float(item.get(field, item.get("pv_estimate", 0)) or 0)
                 except (TypeError, ValueError):
                     continue
                 slots.append((dt_util.as_utc(when), kw))
@@ -311,8 +317,12 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         dt_h = self.period / 60
         starts = [dt_util.as_local(r.start) for r in results]
         load = [r.elec_kwh + float(o[CONF_BASELOAD]) * dt_h for r in results]
+        utc_starts = [dt_util.as_utc(t) for t in starts]
         slots, solar_ok = self._solar_slots()
-        pv = solar_per_period([dt_util.as_utc(t) for t in starts], self.period, slots)
+        pv = solar_per_period(utc_starts, self.period, slots)
+        field = SOLAR_CONFIDENCE_FIELD.get(o[CONF_SOLAR_CONFIDENCE], "pv_estimate")
+        low_slots, _ = self._solar_slots(field)
+        pv_low = solar_per_period(utc_starts, self.period, low_slots)
         params = BatteryParams(
             capacity_kwh=float(o[CONF_BATTERY_KWH]),
             min_soc=float(o[CONF_MIN_SOC]),
@@ -322,12 +332,14 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             discharge_power_kw=float(o[CONF_DISCHARGE_KW]),
             discharge_threshold_soc=float(o[CONF_DISCHARGE_THRESHOLD]),
             solar_headroom_kwh=float(o[CONF_SOLAR_HEADROOM]),
+            load_margin_pct=float(o[CONF_LOAD_MARGIN]),
         )
         plan = make_plan(
             starts=starts,
             period_minutes=self.period,
             load_kwh=load,
             pv_kwh=pv,
+            pv_low_kwh=pv_low,
             soc_now=soc_now,
             params=params,
             charge_windows=parse_windows(o[CONF_CHEAP_WINDOWS]),

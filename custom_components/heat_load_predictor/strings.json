@@ -94,7 +94,9 @@
           "cheap_windows": "Cheap windows (charge)",
           "discharge_windows": "Discharge windows (make room for solar)",
           "discharge_threshold_soc": "Skip discharge if target is above",
-          "solar_headroom_kwh": "Extra room to leave for solar"
+          "solar_headroom_kwh": "Extra room to leave for solar",
+          "solar_confidence": "Solar forecast used to size charges",
+          "load_margin_pct": "Demand safety margin"
         },
         "data_description": {
           "battery_soc_entity": "A sensor reporting the battery's state of charge in %.",
@@ -107,7 +109,9 @@
           "cheap_windows": "Daily times, e.g. 04:00-07:00, 13:00-16:00, 22:00-00:00 (Cosy Octopus). Each window is a charge slot, numbered in this order.",
           "discharge_windows": "Daily times to empty the battery ahead of big solar days, e.g. 00:30-05:30. Leave empty to never discharge.",
           "discharge_threshold_soc": "If the room the solar needs only means discharging to above this SOC, it isn't worth it and the window is skipped.",
-          "solar_headroom_kwh": "Added to the solar room calculation as a safety margin."
+          "solar_headroom_kwh": "Added to the solar room calculation as a safety margin.",
+          "solar_confidence": "Pessimistic uses Solcast's 10th-percentile estimate (beaten on about 9 days in 10), so a duller afternoon than forecast doesn't leave the battery short at peak times. The projected SOC on the card always uses the expected forecast.",
+          "load_margin_pct": "Charges are sized as if the heat pump and house use this much more than forecast."
         }
       }
     },
@@ -179,6 +183,15 @@
           "name": "Refresh first",
           "description": "Rerun the model before returning."
         }
+      }
+    }
+  },
+  "selector": {
+    "solar_confidence": {
+      "options": {
+        "pessimistic": "Pessimistic (10th percentile, recommended)",
+        "expected": "Expected (median)",
+        "optimistic": "Optimistic (90th percentile)"
       }
     }
   }

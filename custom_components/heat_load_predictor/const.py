@@ -1,7 +1,7 @@
 """Constants for Heat Load Predictor."""
 
 DOMAIN = "heat_load_predictor"
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR = "indoor_temp_entity"
@@ -57,3 +57,13 @@ BATTERY_DEFAULTS = {
     CONF_DISCHARGE_THRESHOLD: 80,
     CONF_SOLAR_HEADROOM: 2.6,
 }
+
+CONF_SOLAR_CONFIDENCE = "solar_confidence"   # forecast used to size charges
+CONF_LOAD_MARGIN = "load_margin_pct"
+SOLAR_CONFIDENCE_FIELD = {
+    "pessimistic": "pv_estimate10",
+    "expected": "pv_estimate",
+    "optimistic": "pv_estimate90",
+}
+BATTERY_DEFAULTS[CONF_SOLAR_CONFIDENCE] = "pessimistic"
+BATTERY_DEFAULTS[CONF_LOAD_MARGIN] = 10

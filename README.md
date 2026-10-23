@@ -174,6 +174,7 @@ The planner steps through the forecast period by period: heat pump electricity p
 - **Cheap windows (charge):** charge to the lowest SOC that still reaches the next cheap window at your chosen arrival SOC. This is sized from the deepest dip of the running balance across the gap.
 - **Discharge windows:** discharge to make room for solar the house can neither use nor export (beyond your export limit), plus a safety headroom. If that would only mean discharging to above a threshold (80 % by default), it isn't worth it and the window is skipped.
 - **Solar room wins:** a charge never fills space the solar will need, and a charge window that overlaps an active discharge is switched off.
+- **Sized cautiously:** charges are sized against Solcast's pessimistic forecast (`pv_estimate10`, which it expects to beat on about 9 days in 10) and with the house's demand raised by a margin (10 % by default). The projected SOC on the card uses the expected forecast, so on a typical day you'll see the battery reach each window above the reserve. That gap is the buffer. Each window is re-planned about 10 minutes before it opens, using the battery's actual level, so a disappointing morning is made up in the afternoon window. For a bigger cushion through the evening peak, raise the arrival SOC.
 
 The defaults suit Cosy Octopus (cheap 04:00-07:00, 13:00-16:00, 22:00-00:00). Solar comes from the [Solcast](https://github.com/BJReplay/ha-solcast-solar) integration's `detailedForecast` attribute.
 

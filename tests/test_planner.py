@@ -32,12 +32,13 @@ def bell(t, peak_kw, rise=8, fall=16):
 
 
 def plan_for(start, *, heat_kw, base_kw=0.4, pv_peak=0.0, soc=50.0, params=None, hours=48):
+    # Exact-sizing tests: no demand margin unless a test asks for one.
     starts = series(start, hours)
     load = [(heat_kw + base_kw) * 0.5 for _ in starts]
     pv = [bell(t, pv_peak) * 0.5 for t in starts]
     return pl.make_plan(
         starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=soc,
-        params=params or pl.BatteryParams(), charge_windows=COSY, discharge_windows=NIGHT,
+        params=params or pl.BatteryParams(load_margin_pct=0), charge_windows=COSY, discharge_windows=NIGHT,
     ), starts, load, pv
 
 
@@ -69,7 +70,7 @@ def test_occurrences_cross_midnight_and_dst():
 def test_winter_charges_to_cover_each_gap():
     start = datetime(2026, 1, 15, 0, tzinfo=LON)
     plan, starts, load, pv = plan_for(start, heat_kw=1.8, pv_peak=2.0, soc=60)
-    p = pl.BatteryParams()
+    p = pl.BatteryParams(load_margin_pct=0)
     # Morning window covers 07:00-13:00: manual running balance.
     bal = low = 0.0
     for i, t in enumerate(starts):
@@ -151,3 +152,24 @@ def test_battery_holds_at_target_through_charge_window():
                  if datetime(2026, 1, 15, 4, 30, tzinfo=LON) <= t <= datetime(2026, 1, 15, 7, tzinfo=LON)]
     assert all(b >= a - 1e-9 for a, b in zip(in_window, in_window[1:])), in_window  # never drains
     assert abs(in_window[-1] - m.target_soc) < 0.01, in_window                       # ends on target
+
+
+def test_cautious_sizing_charges_more_but_projection_stays_expected():
+    """Pessimistic solar and a demand margin raise the charge; the projected
+    SOC still follows the expected forecast, so the battery is projected to
+    arrive above the reserve, which is the buffer."""
+    start = datetime(2026, 3, 10, 0, tzinfo=LON)
+    starts = series(start)
+    load = [(1.2 + 0.4) * 0.5 for _ in starts]
+    pv = [bell(t, 4.0) * 0.5 for t in starts]
+    pv_low = [x * 0.4 for x in pv]
+    base = dict(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=40,
+                charge_windows=COSY, discharge_windows=NIGHT)
+    plain = pl.make_plan(**base, params=pl.BatteryParams(load_margin_pct=0))
+    cautious = pl.make_plan(**base, pv_low_kwh=pv_low, params=pl.BatteryParams(load_margin_pct=10))
+    when = datetime(2026, 3, 10, 13, tzinfo=LON)
+    a, c = find(plain, "charge", when), find(cautious, "charge", when)
+    assert c.target_soc > a.target_soc
+    # Expected path: the cautious plan reaches the 22:00 window with a buffer.
+    t22 = datetime(2026, 3, 10, 22, tzinfo=LON)
+    assert dict(cautious.soc)[t22] > dict(plain.soc)[t22] + 5
