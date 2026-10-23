@@ -95,6 +95,50 @@ def occurrences(
     return out
 
 
+def ranges_to_occurrences(
+    ranges: Sequence[tuple[datetime, datetime]], kind: str, first: datetime, last: datetime
+) -> list[Occurrence]:
+    """Explicit (start, end) ranges as occurrences, numbered per local day.
+
+    The first range starting on a given day is slot 1, the second slot 2, and
+    so on, so a tariff's daily windows map onto the same inverter slots each day.
+    """
+    out: list[Occurrence] = []
+    count: dict = {}
+    for start, end in sorted(ranges):
+        day = start.date()
+        count[day] = count.get(day, 0) + 1
+        if end > first and start < last:
+            out.append(Occurrence(kind, count[day], start, end))
+    return out
+
+
+def cheap_ranges(
+    rates: Sequence[tuple[datetime, datetime, float]], tolerance_pct: float = 10.0
+) -> list[tuple[datetime, datetime]]:
+    """Cheapest band of each day from (start, end, price) rate periods.
+
+    A period is cheap when its price is within `tolerance_pct` of that day's
+    lowest price (days are the local dates of the period starts). Adjacent
+    cheap periods are merged into one window.
+    """
+    by_day: dict = {}
+    for r in rates:
+        by_day.setdefault(r[0].date(), []).append(r)
+    cheap: list[tuple[datetime, datetime]] = []
+    for day_rates in by_day.values():
+        lowest = min(p for _, _, p in day_rates)
+        limit = lowest + abs(lowest) * tolerance_pct / 100
+        cheap += [(s, e) for s, e, p in day_rates if p <= limit + 1e-9]
+    merged: list[tuple[datetime, datetime]] = []
+    for s, e in sorted(cheap):
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(e, merged[-1][1]))
+        else:
+            merged.append((s, e))
+    return merged
+
+
 # --------------------------------------------------------------------------
 # Plan
 # --------------------------------------------------------------------------
@@ -168,6 +212,7 @@ def make_plan(
     params: BatteryParams,
     charge_windows: Sequence[tuple[time, time]],
     discharge_windows: Sequence[tuple[time, time]],
+    charge_ranges: Sequence[tuple[datetime, datetime]] | None = None,
 ) -> Plan:
     """Plan charge and discharge windows across the forecast periods.
 
@@ -187,7 +232,10 @@ def make_plan(
     horizon_end = starts[-1] + dt
 
     occ = occurrences(discharge_windows, "discharge", starts[0], horizon_end)
-    occ += occurrences(charge_windows, "charge", starts[0], horizon_end)
+    if charge_ranges is not None:
+        occ += ranges_to_occurrences(charge_ranges, "charge", starts[0], horizon_end)
+    else:
+        occ += occurrences(charge_windows, "charge", starts[0], horizon_end)
     occ.sort(key=lambda o: (o.start, 0 if o.kind == "discharge" else 1))
     charge_occ = [o for o in occ if o.kind == "charge"]
 

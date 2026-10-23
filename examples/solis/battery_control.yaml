@@ -2,10 +2,10 @@ alias: "Solis: Battery Control"
 description: >
   One automation for the Solis battery, driven by the Heat Load Predictor's
   battery plan. Three jobs, chosen by trigger:
-  1. Apply plan - shortly before each window (discharge slot 1 at 00:25, charge
-     slots 1-3 at 03:50, 12:50, 21:50 for Cosy Octopus) copy the plan's times,
-     target SOC and on/off into the inverter. If the plan is unavailable,
-     discharge stays off and charging falls back to 80%.
+  1. Apply plan - at the plan's "next inverter update" time (shortly before each
+     window, wherever the tariff puts it) copy each window due in the next 20
+     minutes into its Solis slot: times, target SOC and on/off. If the plan is
+     unavailable, fixed Cosy-time triggers keep discharge off and charge to 80%.
   2. Stop discharge at target - every 2 minutes during the discharge window,
      once SOC reaches the target, switch discharge slot 1 off so the inverter
      doesn't import from the grid to hold that level.
@@ -15,17 +15,21 @@ description: >
   Adjust the entity names in the variables to suit your installation.
 triggers:
   - trigger: time
+    at: sensor.heat_pump_battery_next_inverter_update
+    id: apply
+  # Safety net, used only when the plan is unavailable (Cosy times).
+  - trigger: time
     at: "00:25:00"
-    id: discharge_1
+    id: fallback_discharge_1
   - trigger: time
     at: "03:50:00"
-    id: charge_1
+    id: fallback_charge_1
   - trigger: time
     at: "12:50:00"
-    id: charge_2
+    id: fallback_charge_2
   - trigger: time
     at: "21:50:00"
-    id: charge_3
+    id: fallback_charge_3
   - trigger: time_pattern
     minutes: /2
     id: discharge_check
@@ -40,72 +44,116 @@ variables:
   mode_entity: select.solis8_energy_storage_control_switch
   mask_entity: number.solis8_timed_charge_discharge_on_off
   battery_kwh: 32
+  plan_ok: "{{ states(plan_entity) not in ['unavailable', 'unknown'] and state_attr(plan_entity, 'slots') is mapping }}"
 actions:
   - choose:
       # ---------------------------------------------------------------- 1
       - alias: Apply plan
         conditions:
           - condition: trigger
-            id: [discharge_1, charge_1, charge_2, charge_3]
+            id: apply
+          - condition: template
+            value_template: "{{ plan_ok }}"
         sequence:
           - variables:
-              kind: "{{ trigger.id.split('_')[0] }}"
-              slot: "{{ trigger.id.split('_')[1] | int }}"
-              plan: "{{ (state_attr(plan_entity, 'slots') or {}).get(trigger.id) }}"
-              ok: "{{ plan is mapping and states(plan_entity) not in ['unavailable', 'unknown'] }}"
-              # Solis entity names: slot 1 has no suffix, others end _2, _3 ...
-              prefix: "number.solis8_timed_{{ kind }}"
+              # Windows starting within the next 20 minutes.
+              due: >-
+                {% set ns = namespace(keys=[]) %}
+                {% for key, w in (state_attr(plan_entity, 'slots') or {}).items() %}
+                  {% set mins = (as_timestamp(w.start) - as_timestamp(now())) / 60 %}
+                  {% if -1 <= mins <= 20 %}{% set ns.keys = ns.keys + [key] %}{% endif %}
+                {% endfor %}
+                {{ ns.keys }}
+          - repeat:
+              for_each: "{{ due }}"
+              sequence:
+                - variables:
+                    key: "{{ repeat.item }}"
+                    kind: "{{ key.split('_')[0] }}"
+                    slot: "{{ key.split('_')[1] | int }}"
+                    w: "{{ state_attr(plan_entity, 'slots')[key] }}"
+                    # Solis entity names: slot 1 has no suffix, others end _2, _3 ...
+                    prefix: "number.solis8_timed_{{ kind }}"
+                    sfx: "{{ '' if slot == 1 else '_' ~ slot }}"
+                    # Bitmask: charge slots are bits 0-5, discharge slots bits 6-11.
+                    bit: "{{ 2 ** ((slot - 1) + (6 if kind == 'discharge' else 0)) }}"
+                    start_h: "{{ as_datetime(w.start).hour }}"
+                    start_m: "{{ as_datetime(w.start).minute }}"
+                    # A window ending at midnight is written as 23:59.
+                    end_hm: >-
+                      {% set e = as_datetime(w.end) %}
+                      {{ '23:59' if e.hour == 0 and e.minute == 0 else e.strftime('%H:%M') }}
+                    mask: "{{ states(mask_entity) | int(0) }}"
+                    new_mask: "{{ (mask | bitwise_or(bit)) if w.enabled else (mask | bitwise_and(4095 - bit)) }}"
+                - action: number.set_value
+                  target: { entity_id: "{{ prefix }}_start_hours{{ sfx }}" }
+                  data: { value: "{{ start_h }}" }
+                - action: number.set_value
+                  target: { entity_id: "{{ prefix }}_start_minutes{{ sfx }}" }
+                  data: { value: "{{ start_m }}" }
+                - action: number.set_value
+                  target: { entity_id: "{{ prefix }}_end_hours{{ sfx }}" }
+                  data: { value: "{{ end_hm.split(':')[0] | int }}" }
+                - action: number.set_value
+                  target: { entity_id: "{{ prefix }}_end_minutes{{ sfx }}" }
+                  data: { value: "{{ end_hm.split(':')[1] | int }}" }
+                - if:
+                    - condition: template
+                      value_template: "{{ w.enabled }}"
+                  then:
+                    - action: number.set_value
+                      target: { entity_id: "{{ prefix }}_soc{{ sfx }}" }
+                      data: { value: "{{ w.target_soc }}" }
+                - action: number.set_value
+                  target: { entity_id: "{{ mask_entity }}" }
+                  data: { value: "{{ new_mask }}" }
+                - action: system_log.write
+                  data:
+                    level: info
+                    message: >-
+                      Battery plan {{ key }}: {{ 'ON' if w.enabled else 'off' }}
+                      {{ '%02d:%02d' % (start_h, start_m) }}-{{ end_hm }}
+                      {% if w.enabled %}to {{ w.target_soc }}%{% endif %} - {{ w.reason }}.
+                      Bitmask {{ mask }} -> {{ new_mask }}.
+          - if:
+              - condition: template
+                value_template: "{{ due | count > 0 }}"
+            then:
+              - action: script.solis8_update_charge_discharge_times
+
+      # ---------------------------------------------------------------- 1b
+      - alias: Safety net when the plan is unavailable
+        conditions:
+          - condition: trigger
+            id: [fallback_discharge_1, fallback_charge_1, fallback_charge_2, fallback_charge_3]
+          - condition: template
+            value_template: "{{ not plan_ok }}"
+        sequence:
+          - variables:
+              kind: "{{ trigger.id.split('_')[1] }}"
+              slot: "{{ trigger.id.split('_')[2] | int }}"
               sfx: "{{ '' if slot == 1 else '_' ~ slot }}"
-              # Bitmask: charge slots are bits 0-5, discharge slots bits 6-11.
               bit: "{{ 2 ** ((slot - 1) + (6 if kind == 'discharge' else 0)) }}"
-              start_h: "{{ as_datetime(plan.start).hour if ok else 0 }}"
-              start_m: "{{ as_datetime(plan.start).minute if ok else 0 }}"
-              # A window ending at midnight is written as 23:59.
-              end_hm: >-
-                {% set e = as_datetime(plan.end) if ok else none %}
-                {{ '23:59' if not e or (e.hour == 0 and e.minute == 0) else e.strftime('%H:%M') }}
-              enabled: "{{ plan.enabled if ok else kind == 'charge' }}"
-              target: "{{ plan.target_soc if ok else 80 }}"
               mask: "{{ states(mask_entity) | int(0) }}"
-              new_mask: "{{ (mask | bitwise_or(bit)) if enabled else (mask | bitwise_and(4095 - bit)) }}"
+              charge: "{{ kind == 'charge' }}"
+              new_mask: "{{ (mask | bitwise_or(bit)) if charge else (mask | bitwise_and(4095 - bit)) }}"
           - if:
               - condition: template
-                value_template: "{{ ok }}"
+                value_template: "{{ charge }}"
             then:
               - action: number.set_value
-                target: { entity_id: "{{ prefix }}_start_hours{{ sfx }}" }
-                data: { value: "{{ start_h }}" }
-              - action: number.set_value
-                target: { entity_id: "{{ prefix }}_start_minutes{{ sfx }}" }
-                data: { value: "{{ start_m }}" }
-              - action: number.set_value
-                target: { entity_id: "{{ prefix }}_end_hours{{ sfx }}" }
-                data: { value: "{{ end_hm.split(':')[0] | int }}" }
-              - action: number.set_value
-                target: { entity_id: "{{ prefix }}_end_minutes{{ sfx }}" }
-                data: { value: "{{ end_hm.split(':')[1] | int }}" }
-          - if:
-              - condition: template
-                value_template: "{{ enabled }}"
-            then:
-              - action: number.set_value
-                target: { entity_id: "{{ prefix }}_soc{{ sfx }}" }
-                data: { value: "{{ target }}" }
+                target: { entity_id: "number.solis8_timed_charge_soc{{ sfx }}" }
+                data: { value: 80 }
           - action: number.set_value
             target: { entity_id: "{{ mask_entity }}" }
             data: { value: "{{ new_mask }}" }
           - action: script.solis8_update_charge_discharge_times
           - action: system_log.write
             data:
-              level: "{{ 'info' if ok else 'warning' }}"
+              level: warning
               message: >-
-                Battery plan {{ trigger.id }}:
-                {% if ok %}{{ 'ON' if enabled else 'off' }}
-                {{ '%02d:%02d' % (start_h, start_m) }}-{{ end_hm }}
-                {% if enabled %}to {{ target }}%{% endif %} - {{ plan.reason }}.
-                {% else %}plan unavailable, {{ 'charging to 80%' if kind == 'charge' else 'discharge off' }}.
-                {% endif %}
-                Bitmask {{ mask }} -> {{ new_mask }}.
+                Battery plan unavailable at {{ trigger.id }}:
+                {{ 'charging to 80%' if charge else 'discharge off' }}. Bitmask {{ mask }} -> {{ new_mask }}.
 
       # ---------------------------------------------------------------- 2
       - alias: Stop discharge at target

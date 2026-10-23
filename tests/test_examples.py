@@ -217,3 +217,51 @@ async def test_storage_mode_fallback_without_plan(hass: HomeAssistant, freezer) 
     hass.states.async_set("sensor.solcast_pv_forecast_forecast_remaining_today", "5")
     await _at(hass, freezer, day, 9, 30)
     assert hass.states.get("select.solis8_energy_storage_control_switch").state == "Self-Use"
+
+
+def _rates_attr(day, cheap):
+    out = []
+    for i in range(48):
+        s = day + timedelta(minutes=30 * i)
+        h = s.hour + s.minute / 60
+        price = 0.135 if any(a <= h < b for a, b in cheap) else 0.27
+        out.append({"start": s, "end": s + timedelta(minutes=30), "value_inc_vat": price,
+                    "is_capped": False, "is_intelligent_adjusted": False})
+    return out
+
+
+async def test_windows_follow_octopus_rates(hass: HomeAssistant, freezer) -> None:
+    """A tariff with moved cheap windows: plan, update time and inverter slots follow."""
+    from homeassistant.config_entries import ConfigEntryState  # noqa: F401
+
+    day = datetime(2026, 1, 15, tzinfo=LON)
+    moved = ((3, 6), (12, 14.5), (21, 23))
+    calls = await _rig(hass, freezer, day, soc=40, pv_peak=1.5, temp=1.0)
+    hass.states.async_set("event.octopus_today", "2026-01-15", {"rates": _rates_attr(day, moved)})
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+    hass.config_entries.async_update_entry(entry, options={**entry.options, "rates_today_entity": "event.octopus_today"})
+    await hass.async_block_till_done()
+
+    plan = hass.states.get("sensor.heat_pump_battery_plan").attributes
+    assert plan["charge_windows_from"] == "tariff"
+    c1 = plan["slots"]["charge_1"]
+    assert (c1["start"][11:16], c1["end"][11:16]) == ("03:00", "06:00")
+    assert plan["slots"]["charge_2"]["end"][11:16] == "14:30"
+    nxt = hass.states.get("sensor.heat_pump_battery_next_inverter_update")
+    assert nxt.state.startswith("2026-01-15T00:20")            # discharge window first (00:30)
+
+    await _at(hass, freezer, day, 0, 25)
+    assert hass.states.get("sensor.heat_pump_battery_next_inverter_update").state.startswith("2026-01-15T02:50")
+    calls.clear()
+    await _at(hass, freezer, day, 2, 50)
+    w = _written(calls)
+    assert (w["number.solis8_timed_charge_start_hours"], w["number.solis8_timed_charge_end_hours"]) == (3, 6)
+    calls.clear()
+    await _at(hass, freezer, day, 11, 50)
+    w = _written(calls)
+    assert (w["number.solis8_timed_charge_start_hours_2"], w["number.solis8_timed_charge_end_hours_2"],
+            w["number.solis8_timed_charge_end_minutes_2"]) == (12, 14, 30)
+    # Tomorrow has no published rates yet: the fixed (Cosy) windows are used.
+    tomorrow = [x for x in hass.states.get("sensor.heat_pump_battery_plan").attributes["windows"]
+                if x["kind"] == "charge" and x["start"].startswith("2026-01-16")]
+    assert tomorrow and tomorrow[0]["start"][11:16] == "04:00"

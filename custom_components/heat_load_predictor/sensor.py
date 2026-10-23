@@ -17,6 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import CONF_BATTERY_ENABLED, DOMAIN, VERSION
 from .coordinator import HeatLoadCoordinator
@@ -79,7 +80,11 @@ async def async_setup_entry(
     coordinator: HeatLoadCoordinator = entry.runtime_data
     entities: list[SensorEntity] = [HeatLoadSensor(coordinator, desc) for desc in SENSORS]
     if entry.options.get(CONF_BATTERY_ENABLED):
-        entities += [BatteryPlanSensor(coordinator), BatteryMinSocSensor(coordinator)]
+        entities += [
+            BatteryPlanSensor(coordinator),
+            BatteryMinSocSensor(coordinator),
+            BatteryNextWriteSensor(coordinator),
+        ]
     async_add_entities(entities)
 
 
@@ -166,7 +171,7 @@ class BatteryPlanSensor(_BatteryBase):
         if not plan:
             return None
         return {k: plan[k] for k in (
-            "soc_now", "solar_forecast", "storage_mode", "self_use_from",
+            "soc_now", "solar_forecast", "storage_mode", "self_use_from", "charge_windows_from",
             "next", "slots", "windows", "soc_forecast")}
 
 
@@ -183,3 +188,26 @@ class BatteryMinSocSensor(_BatteryBase):
     def native_value(self) -> float | None:
         plan = self._plan
         return plan["min_soc_24h"] if plan else None
+
+
+class BatteryNextWriteSensor(_BatteryBase):
+    """When the inverter next needs updating, and which slots.
+
+    Automations can use this in a time trigger (`at: sensor....`) so inverter
+    writes follow the windows, wherever the tariff puts them.
+    """
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(self, coordinator: HeatLoadCoordinator) -> None:
+        super().__init__(coordinator, "battery_next_write")
+
+    @property
+    def native_value(self):
+        plan = self._plan
+        return dt_util.parse_datetime(plan["next_write"]) if plan and plan.get("next_write") else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        plan = self._plan
+        return {"slots": plan["next_write_slots"]} if plan else None

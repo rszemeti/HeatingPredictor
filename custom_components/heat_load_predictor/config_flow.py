@@ -25,7 +25,10 @@ from .const import (
     CONF_MIN_SOC,
     CONF_RESERVE_SOC,
     CONF_SOC_ENTITY,
+    CONF_CHEAP_TOLERANCE,
     CONF_LOAD_MARGIN,
+    CONF_RATES_TODAY,
+    CONF_RATES_TOMORROW,
     CONF_SOLAR_CONFIDENCE,
     CONF_SOLAR_HEADROOM,
     CONF_SOLAR_TODAY,
@@ -129,6 +132,8 @@ def _battery_schema(current: dict[str, Any]) -> vol.Schema:
         (CONF_SOC_ENTITY, {"domain": "sensor"}),
         (CONF_SOLAR_TODAY, {"domain": "sensor"}),
         (CONF_SOLAR_TOMORROW, {"domain": "sensor"}),
+        (CONF_RATES_TODAY, {"domain": "event"}),
+        (CONF_RATES_TOMORROW, {"domain": "event"}),
     ):
         k, v = _optional_entity(key, d, **cfg)
         fields[k] = v
@@ -140,6 +145,7 @@ def _battery_schema(current: dict[str, Any]) -> vol.Schema:
     fields[vol.Required(CONF_CHARGE_KW, default=d[CONF_CHARGE_KW])] = _number(0.1, 100, 0.1, "kW")
     fields[vol.Required(CONF_DISCHARGE_KW, default=d[CONF_DISCHARGE_KW])] = _number(0.1, 100, 0.1, "kW")
     fields[vol.Optional(CONF_CHEAP_WINDOWS, default=d[CONF_CHEAP_WINDOWS])] = selector.TextSelector()
+    fields[vol.Required(CONF_CHEAP_TOLERANCE, default=d[CONF_CHEAP_TOLERANCE])] = _number(0, 200, 1, "%")
     fields[vol.Optional(CONF_DISCHARGE_WINDOWS, default=d[CONF_DISCHARGE_WINDOWS])] = selector.TextSelector()
     fields[vol.Required(CONF_DISCHARGE_THRESHOLD, default=d[CONF_DISCHARGE_THRESHOLD])] = _number(0, 100, 1, "%")
     fields[vol.Required(CONF_SOLAR_HEADROOM, default=d[CONF_SOLAR_HEADROOM])] = _number(0, 100, 0.1, "kWh")
@@ -248,4 +254,6 @@ class HeatLoadPredictorOptionsFlow(OptionsFlow):
         )
 
 
-BATTERY_KEYS = set(BATTERY_DEFAULTS) | {CONF_SOC_ENTITY, CONF_SOLAR_TODAY, CONF_SOLAR_TOMORROW}
+BATTERY_KEYS = set(BATTERY_DEFAULTS) | {
+    CONF_SOC_ENTITY, CONF_SOLAR_TODAY, CONF_SOLAR_TOMORROW, CONF_RATES_TODAY, CONF_RATES_TOMORROW,
+}

@@ -31,7 +31,10 @@ from .const import (
     CONF_MIN_SOC,
     CONF_RESERVE_SOC,
     CONF_SOC_ENTITY,
+    CONF_CHEAP_TOLERANCE,
     CONF_LOAD_MARGIN,
+    CONF_RATES_TODAY,
+    CONF_RATES_TOMORROW,
     CONF_SOLAR_CONFIDENCE,
     CONF_SOLAR_HEADROOM,
     CONF_SOLAR_TODAY,
@@ -51,9 +54,10 @@ from .const import (
     DEFAULT_PERIOD,
     DOMAIN,
     SOLAR_CONFIDENCE_FIELD,
+    WRITE_LEAD_MINUTES,
     STORAGE_VERSION,
 )
-from .planner import BatteryParams, make_plan, parse_windows
+from .planner import BatteryParams, cheap_ranges, make_plan, occurrences, parse_windows
 from .model import (
     HouseParams,
     align_down,
@@ -293,6 +297,39 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 found = True
         return slots, found
 
+    def _rates(self) -> list[tuple[datetime, datetime, float]]:
+        """(start, end, price) periods from Octopus Energy rate event entities."""
+        out: list[tuple[datetime, datetime, float]] = []
+        for key in (CONF_RATES_TODAY, CONF_RATES_TOMORROW):
+            entity_id = self.config_entry.options.get(key)
+            state = self.hass.states.get(entity_id) if entity_id else None
+            for r in (state.attributes.get("rates") if state else None) or []:
+                try:
+                    start, end = (
+                        v if isinstance(v, datetime) else dt_util.parse_datetime(str(v))
+                        for v in (r["start"], r["end"])
+                    )
+                    price = float(r["value_inc_vat"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if start and end:
+                    out.append((dt_util.as_local(start), dt_util.as_local(end), price))
+        return sorted(set(out))
+
+    def _charge_ranges(
+        self, o: dict, first: datetime, last: datetime
+    ) -> tuple[list[tuple[datetime, datetime]] | None, str]:
+        """Cheap windows from the tariff, with the fixed windows beyond its rates."""
+        rates = self._rates()
+        if not rates:
+            return None, "fixed"
+        ranges = cheap_ranges(rates, float(o[CONF_CHEAP_TOLERANCE]))
+        covered_until = max(e for _, e, _ in rates)
+        if covered_until < last:
+            fixed = occurrences(parse_windows(o[CONF_CHEAP_WINDOWS]), "charge", first, last)
+            ranges += [(f.start, f.end) for f in fixed if f.start >= covered_until]
+        return ranges, "tariff"
+
     def _plan_battery(self, results: list, now_local: datetime) -> dict[str, Any]:
         o = {**BATTERY_DEFAULTS, **self.config_entry.options}
         soc_state = self.hass.states.get(o.get(CONF_SOC_ENTITY) or "")
@@ -323,6 +360,9 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         field = SOLAR_CONFIDENCE_FIELD.get(o[CONF_SOLAR_CONFIDENCE], "pv_estimate")
         low_slots, _ = self._solar_slots(field)
         pv_low = solar_per_period(utc_starts, self.period, low_slots)
+        charge_ranges, charge_source = self._charge_ranges(
+            o, starts[0], starts[-1] + timedelta(minutes=self.period)
+        )
         params = BatteryParams(
             capacity_kwh=float(o[CONF_BATTERY_KWH]),
             min_soc=float(o[CONF_MIN_SOC]),
@@ -344,6 +384,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             params=params,
             charge_windows=parse_windows(o[CONF_CHEAP_WINDOWS]),
             discharge_windows=parse_windows(o[CONF_DISCHARGE_WINDOWS]),
+            charge_ranges=charge_ranges,
         )
         windows = [w.as_dict() for w in plan.windows if w.end > now_local]
         # The next occurrence of each slot, keyed like "charge_1", "discharge_1".
@@ -358,6 +399,13 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             summary = f"{verb} to {nxt['target_soc']}% at {when:%H:%M}"
         else:
             summary = "No charging needed"
+        # When the inverter next needs updating: shortly before the next window.
+        lead = timedelta(minutes=WRITE_LEAD_MINUTES)
+        writes = sorted(
+            (w.start - lead, f"{w.kind}_{w.slot}") for w in plan.windows if w.start - lead > now_local
+        )
+        next_write = writes[0][0] if writes else None
+        next_write_slots = [k for t, k in writes if t == next_write]
         socs = [v for _, v in plan.soc]
         modes = plan.modes
         storage_mode = modes[0][1] if modes else "Self-Use"
@@ -370,6 +418,9 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return {
             "summary": summary,
             "storage_mode": storage_mode,
+            "charge_windows_from": charge_source,
+            "next_write": next_write.isoformat() if next_write else None,
+            "next_write_slots": next_write_slots,
             "self_use_from": self_use_from,
             "soc_now": soc_now,
             "solar_forecast": solar_ok,

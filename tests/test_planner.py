@@ -228,3 +228,46 @@ def test_big_day_flips_to_self_use_as_early_as_possible_without_clipping():
     _, old_path = _replay_lost(pl.Plan(modes=old_modes), starts, load, pv, 40, params)
     i17 = starts.index(datetime(2026, 6, 15, 17, tzinfo=LON))
     assert path[i17] >= old_path[i17] - 0.5
+
+
+def _cosy_rates(day, cheap=((4, 7), (13, 16), (22, 24)), peak=(16, 19)):
+    out = []
+    for i in range(48):
+        s = day + timedelta(minutes=30 * i)
+        h = s.hour + s.minute / 60
+        price = 0.27
+        if any(a <= h < b for a, b in cheap):
+            price = 0.135
+        elif peak[0] <= h < peak[1]:
+            price = 0.40
+        out.append((s, s + timedelta(minutes=30), price))
+    return out
+
+
+def test_cheap_ranges_from_cosy_rates():
+    day = datetime(2026, 10, 23, tzinfo=LON)
+    ranges = pl.cheap_ranges(_cosy_rates(day))
+    assert [(s.strftime("%H:%M"), e.strftime("%H:%M")) for s, e in ranges] == [
+        ("04:00", "07:00"), ("13:00", "16:00"), ("22:00", "00:00")]
+
+
+def test_cheap_ranges_follow_a_changed_tariff():
+    day = datetime(2026, 10, 23, tzinfo=LON)
+    ranges = pl.cheap_ranges(_cosy_rates(day, cheap=((3, 6), (12, 14.5))))
+    assert [(s.strftime("%H:%M"), e.strftime("%H:%M")) for s, e in ranges] == [("03:00", "06:00"), ("12:00", "14:30")]
+    occ = pl.ranges_to_occurrences(ranges, "charge", day, day + timedelta(days=1))
+    assert [o.slot for o in occ] == [1, 2]
+
+
+def test_plan_from_ranges_matches_plan_from_fixed_windows():
+    start = datetime(2026, 1, 15, 0, tzinfo=LON)
+    starts = series(start)
+    load = [1.1 for _ in starts]
+    pv = [bell(t, 2.0) * 0.5 for t in starts]
+    rates = _cosy_rates(start) + _cosy_rates(start + timedelta(days=1))
+    kw = dict(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=50,
+              params=pl.BatteryParams(), charge_windows=COSY, discharge_windows=NIGHT)
+    fixed = pl.make_plan(**kw)
+    tariff = pl.make_plan(**kw, charge_ranges=pl.cheap_ranges(rates))
+    key = lambda p: [(w.kind, w.slot, w.start, w.enabled, w.target_soc) for w in p.windows]
+    assert key(fixed) == key(tariff)
