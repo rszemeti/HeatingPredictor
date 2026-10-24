@@ -49,6 +49,9 @@ variables:
   mode_entity: select.solis8_energy_storage_control_switch
   mask_entity: number.solis8_timed_charge_discharge_on_off
   battery_kwh: 32
+  # The inverter's clock: true if it follows UK time (BST in summer), false if
+  # it stays on GMT/UTC all year. Window times are written in the inverter's time.
+  inverter_uses_local_time: true
   plan_ok: "{{ states(plan_entity) not in ['unavailable', 'unknown'] and state_attr(plan_entity, 'slots') is mapping }}"
 actions:
   - choose:
@@ -95,12 +98,13 @@ actions:
                     sfx: "{{ '' if slot == 1 else '_' ~ slot }}"
                     # Bitmask: charge slots are bits 0-5, discharge slots bits 6-11.
                     bit: "{{ 2 ** ((slot - 1) + (6 if kind == 'discharge' else 0)) }}"
-                    start_h: "{{ as_datetime(w.start).hour }}"
-                    start_m: "{{ as_datetime(w.start).minute }}"
+                    # Times in the inverter's clock (local or UTC).
+                    start_h: "{{ as_timestamp(w.start) | timestamp_custom('%H', inverter_uses_local_time) | int }}"
+                    start_m: "{{ as_timestamp(w.start) | timestamp_custom('%M', inverter_uses_local_time) | int }}"
                     # A window ending at midnight is written as 23:59.
                     end_hm: >-
-                      {% set e = as_datetime(w.end) %}
-                      {{ '23:59' if e.hour == 0 and e.minute == 0 else e.strftime('%H:%M') }}
+                      {% set e = as_timestamp(w.end) | timestamp_custom('%H:%M', inverter_uses_local_time) %}
+                      {{ '23:59' if e == '00:00' else e }}
                     mask: "{{ states(mask_entity) | int(0) }}"
                     new_mask: "{{ (mask | bitwise_or(bit)) if w.enabled else (mask | bitwise_and(4095 - bit)) }}"
                 - action: number.set_value

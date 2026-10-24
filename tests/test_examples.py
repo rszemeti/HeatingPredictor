@@ -25,7 +25,7 @@ def auto_enable_custom_integrations(enable_custom_integrations):
     yield
 
 
-async def _rig(hass, freezer, day: datetime, *, soc, pv_peak, temp, with_soc=True):
+async def _rig(hass, freezer, day: datetime, *, soc, pv_peak, temp, with_soc=True, variables=None):
     await hass.config.async_set_time_zone("Europe/London")
     freezer.move_to(day.replace(hour=0, minute=10))
     calls = []
@@ -77,6 +77,7 @@ async def _rig(hass, freezer, day: datetime, *, soc, pv_peak, temp, with_soc=Tru
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     auto = yaml.safe_load((ROOT / "examples/solis/battery_control.yaml").read_text())
+    auto["variables"].update(variables or {})
     assert await async_setup_component(hass, "automation", {"automation": [auto]})
     await hass.async_block_till_done()
     return calls
@@ -323,3 +324,24 @@ async def test_card_gets_storage_mode_runs(hass: HomeAssistant, freezer) -> None
     assert "mode_runs" not in plan
     if out := os.environ.get("DUMP_CARD_DATA"):
         pathlib.Path(out).write_text(json.dumps(result))
+
+
+async def test_inverter_on_utc_in_summer(hass: HomeAssistant, freezer) -> None:
+    """An inverter left on GMT/UTC all year: in summer (BST) the 22:00-00:00
+    window is written as 21:00-23:00 inverter time."""
+    day = datetime(2026, 6, 15, tzinfo=LON)
+    calls = await _rig(hass, freezer, day, soc=30, pv_peak=1.0, temp=12.0,
+                       variables={"inverter_uses_local_time": False})
+    await _at(hass, freezer, day, 21, 50)
+    w = _written(calls)
+    assert (w["number.solis8_timed_charge_start_hours_3"], w["number.solis8_timed_charge_start_minutes_3"]) == (21, 0)
+    assert (w["number.solis8_timed_charge_end_hours_3"], w["number.solis8_timed_charge_end_minutes_3"]) == (23, 0)
+
+
+async def test_inverter_on_local_time_in_summer(hass: HomeAssistant, freezer) -> None:
+    day = datetime(2026, 6, 15, tzinfo=LON)
+    calls = await _rig(hass, freezer, day, soc=30, pv_peak=1.0, temp=12.0)
+    await _at(hass, freezer, day, 21, 50)
+    w = _written(calls)
+    assert (w["number.solis8_timed_charge_start_hours_3"], w["number.solis8_timed_charge_end_hours_3"],
+            w["number.solis8_timed_charge_end_minutes_3"]) == (22, 23, 59)
