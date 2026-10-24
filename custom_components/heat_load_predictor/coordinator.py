@@ -65,7 +65,7 @@ from .const import (
     VERSION,
 )
 from .learn import base_profile, half_hour_means, slot_of
-from .planner import BatteryParams, cheap_ranges, make_plan, occurrences, parse_windows
+from .planner import BatteryParams, _later, cheap_ranges, make_plan, occurrences, parse_windows
 from .model import (
     HouseParams,
     align_down,
@@ -491,7 +491,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         low_slots, _ = self._solar_slots(field)
         pv_low = solar_per_period(utc_starts, self.period, low_slots)
         charge_ranges, charge_source = self._charge_ranges(
-            o, starts[0], starts[-1] + timedelta(minutes=self.period)
+            o, starts[0], _later(starts[-1], timedelta(minutes=self.period))
         )
         params = BatteryParams(
             capacity_kwh=float(o[CONF_BATTERY_KWH]),
@@ -561,7 +561,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # When the inverter next needs updating: shortly before the next window.
         lead = timedelta(minutes=WRITE_LEAD_MINUTES)
         writes = sorted(
-            (w.start - lead, f"{w.kind}_{w.slot}") for w in plan.windows if w.start - lead > now_local
+            (_later(w.start, -lead), f"{w.kind}_{w.slot}") for w in plan.windows
+            if _later(w.start, -lead) > now_local
         )
         next_write = writes[0][0] if writes else None
         next_write_slots = [k for t, k in writes if t == next_write]
@@ -605,9 +606,9 @@ def _mode_runs(modes: list[tuple[datetime, str]], dt: timedelta) -> list[dict]:
     runs: list[dict] = []
     for t, m in modes:
         if runs and runs[-1]["mode"] == m:
-            runs[-1]["end"] = (t + dt).isoformat()
+            runs[-1]["end"] = _later(t, dt).isoformat()
         else:
-            runs.append({"start": t.isoformat(), "end": (t + dt).isoformat(), "mode": m})
+            runs.append({"start": t.isoformat(), "end": _later(t, dt).isoformat(), "mode": m})
     return runs
 
 

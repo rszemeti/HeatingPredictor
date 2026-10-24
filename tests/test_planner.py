@@ -4,7 +4,7 @@ import importlib.util
 import math
 import pathlib
 import sys
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -23,7 +23,8 @@ NIGHT = pl.parse_windows("00:30-05:30")
 
 
 def series(start, hours=48, period=30):
-    return [start + timedelta(minutes=period * i) for i in range(int(hours * 60 / period))]
+    # Real elapsed time, as Home Assistant provides it (correct across DST).
+    return [pl._later(start, timedelta(minutes=period * i)) for i in range(int(hours * 60 / period))]
 
 
 def bell(t, peak_kw, rise=8, fall=16):
@@ -353,7 +354,7 @@ def test_property_never_below_reserve_before_next_window():
         s, path = soc0, []
         for i, t in enumerate(starts):
             s = pl._step(s, acts.get(i), pv[i], load[i], 0.5, p)
-            path.append((t + timedelta(minutes=30), s))
+            path.append((pl._later(t, timedelta(minutes=30)), s))
         # Check each gap from a window's start to the next window's start.
         for w0, w1 in zip(charge_starts, charge_starts[1:]):
             if w0 in shortish or w0 < starts[0]:
@@ -441,3 +442,34 @@ def test_room_at_credits_overnight_use():
     load = [0.5] * 16
     assert pl._room_needed(pv, load, 0, 16, 0.5, p) == pytest.approx(12.0)
     assert pl._room_at(pv, load, 0, 16, 0.5, p) == pytest.approx(12.0 - 4.0, abs=0.15)   # within the clipping tolerance
+
+
+def _replay(name):
+    import json
+
+    d = json.loads((pathlib.Path(__file__).parent / "data" / name).read_text())
+    starts = [datetime.fromisoformat(t).astimezone(LON) for t in d["starts"]]
+    return d, starts, pl.make_plan(
+        starts=starts, period_minutes=d["period_minutes"], load_kwh=d["load_kwh"], pv_kwh=d["pv_kwh"],
+        pv_low_kwh=d["pv_low_kwh"], soc_now=d["soc_now"], params=pl.BatteryParams(**d["params"]),
+        charge_windows=pl.parse_windows(d["cheap_windows"]),
+        discharge_windows=pl.parse_windows(d["discharge_windows"]))
+
+
+def test_real_plan_across_the_clocks_going_back():
+    """Regression (24-25 Oct, real data): Sunday has 25 hours. Wall-clock
+    arithmetic put every Sunday window an hour early against the solar and
+    load, and the projected SOC repeated 01:30 and 02:00."""
+    d, starts, plan = _replay("plan_2026-10-24_dst.json")
+    times = [t.astimezone(timezone.utc) for t, _ in plan.soc]
+    assert all(a < b for a, b in zip(times, times[1:]))          # real time, no repeats
+    assert len(set(t.isoformat() for t in times)) == len(times)
+    # Sunday's 04:00-07:00 (GMT) window acts from 04:00, not 03:00: the
+    # battery is still draining over 03:00-04:00.
+    soc = {t.astimezone(timezone.utc): v for t, v in plan.soc}
+    utc = lambda h, m=0: datetime(2026, 10, 25, h, m, tzinfo=timezone.utc)
+    assert soc[utc(3, 30)] < soc[utc(3, 0)] and soc[utc(4, 0)] < soc[utc(3, 30)]
+    # Never below the reserve, and no export to the floor overnight.
+    assert min(v for _, v in plan.soc) >= d["params"]["reserve_soc"] - 0.5
+    sun = find(plan, "discharge", datetime(2026, 10, 25, 0, 30, tzinfo=LON))
+    assert not sun.enabled, sun.reason

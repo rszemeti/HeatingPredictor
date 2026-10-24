@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import replace, dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 # --------------------------------------------------------------------------
 # Windows
@@ -71,6 +71,11 @@ class Occurrence:
     slot: int           # 1-based, in the order the windows were configured
     start: datetime
     end: datetime
+
+
+def _later(t: datetime, d: timedelta) -> datetime:
+    """`t` plus real elapsed time `d`, in t's zone (correct across clock changes)."""
+    return (t.astimezone(timezone.utc) + d).astimezone(t.tzinfo)
 
 
 def occurrences(
@@ -234,7 +239,7 @@ def make_plan(
     dt = timedelta(minutes=period_minutes)
     dt_h = period_minutes / 60.0
     cap = params.capacity_kwh
-    horizon_end = starts[-1] + dt
+    horizon_end = _later(starts[-1], dt)
 
     occ = occurrences(discharge_windows, "discharge", starts[0], horizon_end)
     if charge_ranges is not None:
@@ -250,7 +255,9 @@ def make_plan(
 
     def idx(when: datetime) -> int:
         """Index of the first period starting at or after `when` (clamped)."""
-        k = math.ceil((when - starts[0]) / dt)
+        # Real elapsed time (UTC): local wall-clock arithmetic is wrong on the
+        # days the clocks change.
+        k = math.ceil((when.astimezone(timezone.utc) - starts[0].astimezone(timezone.utc)) / dt)
         return min(max(k, 0), n)
 
     # Fill in decisions in time order. `actions[i]` is the SOC target to drive
@@ -448,7 +455,7 @@ def make_plan(
     soc = simulate(n)
     return Plan(
         windows=plans,
-        soc=[(starts[i] + dt, soc[i + 1]) for i in range(n)],
+        soc=[(_later(starts[i], dt), soc[i + 1]) for i in range(n)],
         modes=list(zip(starts, modes)),
     )
 
