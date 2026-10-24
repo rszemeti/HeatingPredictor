@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import replace, dataclass, field
 from datetime import datetime, time, timedelta
 
 # --------------------------------------------------------------------------
@@ -294,6 +294,16 @@ def make_plan(
             room = _room_at(pv_kwh, load_kwh, b, b + day_periods, dt_h, params)
             # Highest SOC the battery may hold when the window ends.
             limit = max(params.min_soc, 100 - (room + params.solar_headroom_kwh) / cap * 100)
+            # Never make room by running short: the battery must still carry the
+            # house until the solar takes over (or the next cheap window),
+            # reaching its minimum no earlier than that, judged on the cautious
+            # forecasts. Losing some solar costs less than buying at full price.
+            nxt_c = next((c for c in charge_occ if c.start >= o.end), None)
+            cover_end = idx(nxt_c.start) if nxt_c else n
+            keep = _keep_soc(pv_cautious, load_cautious, b, cover_end, dt_h, params)
+            protected = keep > limit
+            if protected:
+                limit = keep
 
             def soc_at_end(t: float | None) -> float:
                 s_ = projected
@@ -328,6 +338,9 @@ def make_plan(
                 enabled, reason = True, (
                     f"export down to {target}% to make room for {room:.1f} kWh of "
                     f"solar; the house takes it to {limit:.0f}% by {o.end.strftime('%H:%M')}")
+            if protected:
+                reason += (f" (keeping {keep:.0f}% so the house runs on the battery until the "
+                           f"solar takes over; some solar may be clipped)")
             plans.append(WindowPlan(o.kind, o.slot, o.start, o.end, enabled, target,
                                     projected, 0.0, room, reason))
             if enabled:
@@ -345,8 +358,10 @@ def make_plan(
         gap_start_soc = projected
 
         def lowest(target: float | None) -> float:
+            # Lowest SOC reached during the window and gap. The level the window
+            # opens at doesn't count: no decision now can change it.
             s_ = gap_start_soc
-            low = s_
+            low = math.inf
             for i in range(a, gap_end):
                 act = ("charge", target) if target is not None and i < b else None
                 s_ = _step(s_, act, pv_cautious[i], load_cautious[i], dt_h, params)
@@ -366,15 +381,21 @@ def make_plan(
             # Cheap power is the cheapest there is: fill as far as tomorrow's
             # solar allows, rather than gambling on just scraping through.
             just_enough = _lowest_target(lowest, projected, params)
-            if fill_to > projected + 0.5:
+            if just_enough is not None and just_enough > fill_to:
+                # Solar room never wins over staying off the grid at full price.
+                target, enabled = just_enough, True
+                reason = (f"charge to {target}%, above the {fill_to}% solar limit: needed "
+                          f"to stay above {params.reserve_soc:.0f}% until the next cheap "
+                          f"window (some solar may be clipped)")
+                if lowest(target) < params.reserve_soc - 1e-6:
+                    reason += " (charge rate too low to cover it all)"
+            elif fill_to > projected + 0.5:
                 target, enabled = fill_to, True
                 reason = f"fill to {target}% on cheap power"
                 if fill_to < 100:
                     reason += f" (the rest is room for {room:.1f} kWh of solar)"
                 if lowest(target) < params.reserve_soc - 1e-6:
-                    reason += (" (charge rate too low to cover it all)" if target >= 100
-                               else f"; {just_enough}% would be needed to stay above "
-                                    f"{params.reserve_soc:.0f}% until the next cheap window")
+                    reason += " (charge rate too low to cover it all)"
             elif just_enough is not None:
                 # Already at the solar limit but still short: run the house on
                 # cheap grid power during the window and keep what's stored.
@@ -404,9 +425,8 @@ def make_plan(
                     else:
                         lo_t = mid + 1
                 target, short = hi_t, False
-            capped = target > upper
-            if capped:
-                target = int(max(params.min_soc, math.ceil(upper)))
+            # Solar room never caps a charge below what's needed.
+            capped = False
             enabled = True
             if target > projected + 0.5:
                 reason = f"charge to {target}% to cover {need:.1f} kWh until the next cheap window"
@@ -431,6 +451,33 @@ def make_plan(
         soc=[(starts[i] + dt, soc[i + 1]) for i in range(n)],
         modes=list(zip(starts, modes)),
     )
+
+
+def _keep_soc(pv, load, a: int, b: int, dt_h: float, p: BatteryParams) -> float:
+    """Lowest SOC at period a from which self-use carries the house through
+    [a, b) without the battery going below its minimum: it may reach the
+    minimum, but only as the solar (or the next cheap window) takes over."""
+    free = replace(p, min_soc=0.0)          # let the simulation go below the floor
+
+    def low(s0: float) -> float:
+        s_, m = s0, s0
+        for i in range(a, min(b, len(pv))):
+            s_ = _step(s_, None, pv[i], load[i], dt_h, free)
+            m = min(m, s_)
+        return m
+
+    if low(p.min_soc) >= p.min_soc - 1e-6:
+        return p.min_soc
+    lo, hi = p.min_soc, 100.0
+    if low(hi) < p.min_soc - 1e-6:
+        return 100.0
+    for _ in range(30):
+        mid = (lo + hi) / 2
+        if low(mid) >= p.min_soc - 1e-6:
+            hi = mid
+        else:
+            lo = mid
+    return hi
 
 
 def _lowest_target(lowest, projected: float, p: BatteryParams) -> int | None:

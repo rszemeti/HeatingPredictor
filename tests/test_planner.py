@@ -117,13 +117,31 @@ def test_big_solar_day_discharges_and_skips_morning_charge():
 
 
 def test_solar_room_caps_charge():
-    # Cold but sunny spring morning: heating wants charge, the solar wants room.
+    # Mild sunny spring morning: little heating, the solar wants room.
     start = datetime(2026, 4, 1, 0, tzinfo=LON)
     params = pl.BatteryParams(discharge_threshold_soc=0)  # no discharge, isolate the cap
-    plan, *_ = plan_for(start, heat_kw=1.0, pv_peak=11.0, soc=20, params=params)
+    plan, *_ = plan_for(start, heat_kw=0.2, pv_peak=11.0, soc=20, params=params)
     m = find(plan, "charge", datetime(2026, 4, 1, 4, tzinfo=LON))
     assert m.room_kwh > 0
     assert m.target_soc <= 100 - (m.room_kwh + params.solar_headroom_kwh) / 32 * 100 + 1
+
+
+def test_staying_off_the_grid_beats_solar_room():
+    """Sunny spring morning on the expected forecast, but the pessimistic one
+    is dull: covering the morning on the cautious figures needs more than the
+    solar room allows. Buying at full price is never good, so the charge wins
+    and some solar may be clipped."""
+    start = datetime(2026, 4, 1, 0, tzinfo=LON)
+    starts = series(start)
+    load = [(2.0 + 0.4) * 0.5 for _ in starts]
+    pv = [bell(t, 14.0) * 0.5 for t in starts]
+    params = pl.BatteryParams(discharge_threshold_soc=0)
+    plan = pl.make_plan(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv,
+                        pv_low_kwh=[x * 0.3 for x in pv], soc_now=20, params=params,
+                        charge_windows=COSY, discharge_windows=NIGHT)
+    m = find(plan, "charge", datetime(2026, 4, 1, 4, tzinfo=LON))
+    assert m.enabled and m.target_soc > 100 - (m.room_kwh + params.solar_headroom_kwh) / 32 * 100 + 1
+    assert "solar limit" in m.reason
 
 
 def test_full_battery_needs_no_charge():
@@ -400,13 +418,14 @@ def test_discharge_counts_what_the_house_uses_afterwards():
     plan, starts, load, pv = _sunday(12.0)
     d = find(plan, "discharge", datetime(2026, 10, 25, 0, 30, tzinfo=LON))
     assert d.enabled and d.target_soc > 15, d.reason
-    soc = dict(plan.soc)
-    end = datetime(2026, 10, 25, 5, 30, tzinfo=LON)
-    # Not on the floor before the window ends...
-    assert min(v for t, v in plan.soc if t < end) > 15 + 0.5
-    # ...and still at or under the solar limit at window end.
-    room = pl._room_at(pv, load, starts.index(end), starts.index(end) + 48, 0.5, pl.BatteryParams())
-    assert soc[end] <= 100 - (room + 2.6) / 32 * 100 + 0.5
+    assert "keeping" in d.reason
+    # The battery may reach its minimum, but only once the solar covers the
+    # house: no grid import for the house before then.
+    # plan.soc[i] is the level at the end of period i; once at the minimum,
+    # every following period must be covered by the solar.
+    for i in range(1, len(plan.soc)):
+        if plan.soc[i - 1][1] <= 15 + 1e-6 and starts[i].date() == datetime(2026, 10, 25).date():
+            assert pv[i] >= load[i], (starts[i], plan.soc[i - 1][1])
 
 
 def test_no_discharge_when_the_house_makes_the_room():
