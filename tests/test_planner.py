@@ -228,7 +228,7 @@ def test_big_day_flips_to_self_use_as_early_as_possible_without_clipping():
     params = pl.BatteryParams(discharge_threshold_soc=0,        # isolate day 1: no discharge
                               fill_cheap_windows=False)
     plan, starts, load, pv = plan_for(start, heat_kw=0.0, pv_peak=9.0, soc=40, params=params)
-    today = [(t, m) for t, m in plan.modes if t.date() == start.date()]
+    today = [(t.astimezone(LON), m) for t, m in plan.modes if t.astimezone(LON).date() == start.date()]
     flips = [t for (t0, m0), (t, m) in zip(today, today[1:]) if m0 != m]
     assert len(flips) == 1 and dict(today)[flips[0]] == "Self-Use", flips
     assert 8 <= flips[0].hour <= 14

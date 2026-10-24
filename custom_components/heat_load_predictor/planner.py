@@ -137,10 +137,12 @@ def cheap_ranges(
         lowest = min(p for _, _, p in day_rates)
         limit = lowest + abs(lowest) * tolerance_pct / 100
         cheap += [(s, e) for s, e, p in day_rates if p <= limit + 1e-9]
+    # Merge in real time (UTC): local comparisons go wrong in the repeated hour.
+    utc = lambda t: t.astimezone(timezone.utc)  # noqa: E731
     merged: list[tuple[datetime, datetime]] = []
-    for s, e in sorted(cheap):
-        if merged and s <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(e, merged[-1][1]))
+    for s, e in sorted(cheap, key=lambda r: utc(r[0])):
+        if merged and utc(s) <= utc(merged[-1][1]):
+            merged[-1] = (merged[-1][0], max(e, merged[-1][1], key=utc))
         else:
             merged.append((s, e))
     return merged
@@ -186,12 +188,13 @@ class WindowPlan:
     room_kwh: float          # solar energy that must fit in the battery
     reason: str
 
-    def as_dict(self) -> dict:
+    def as_dict(self, tz=None) -> dict:
+        """For display: times in `tz` (as stored, UTC, if None)."""
         return {
             "kind": self.kind,
             "slot": self.slot,
-            "start": self.start.isoformat(),
-            "end": self.end.isoformat(),
+            "start": self.start.astimezone(tz).isoformat() if tz else self.start.isoformat(),
+            "end": self.end.astimezone(tz).isoformat() if tz else self.end.isoformat(),
             "enabled": self.enabled,
             "target_soc": self.target_soc,
             "projected_soc": round(self.projected_soc, 1),
@@ -226,7 +229,11 @@ def make_plan(
 ) -> Plan:
     """Plan charge and discharge windows across the forecast periods.
 
-    `starts` are timezone-aware local period starts; `load_kwh` and `pv_kwh`
+    Everything inside runs in UTC. `starts` may be in any zone (they're
+    converted); their own zone is used only to place the tariff's daily
+    windows (defined in local wall-clock time) and the local day boundaries.
+    The plan's times come back in UTC: converting for people is the caller's
+    job. `load_kwh` and `pv_kwh`
     hold each period's expected energy. Charges are sized cautiously: against
     `pv_low_kwh` (a pessimistic solar forecast, if given) and the load raised
     by `params.load_margin_pct`. The projected SOC and the solar room use the
@@ -239,13 +246,23 @@ def make_plan(
     dt = timedelta(minutes=period_minutes)
     dt_h = period_minutes / 60.0
     cap = params.capacity_kwh
-    horizon_end = _later(starts[-1], dt)
+    local = starts[0].tzinfo
+    local_starts = [t.astimezone(local) for t in starts]
+    starts = [t.astimezone(timezone.utc) for t in starts]
+    horizon_end = starts[-1] + dt
 
-    occ = occurrences(discharge_windows, "discharge", starts[0], horizon_end)
+    # Tariff windows are local wall-clock times: place them in local time,
+    # then work in UTC.
+    first_l, end_l = local_starts[0], horizon_end.astimezone(local)
+    occ = occurrences(discharge_windows, "discharge", first_l, end_l)
     if charge_ranges is not None:
-        occ += ranges_to_occurrences(charge_ranges, "charge", starts[0], horizon_end)
+        occ += ranges_to_occurrences(
+            [(a.astimezone(local), b.astimezone(local)) for a, b in charge_ranges],
+            "charge", first_l, end_l)
     else:
-        occ += occurrences(charge_windows, "charge", starts[0], horizon_end)
+        occ += occurrences(charge_windows, "charge", first_l, end_l)
+    occ = [Occurrence(o.kind, o.slot, o.start.astimezone(timezone.utc),
+                      o.end.astimezone(timezone.utc)) for o in occ]
     occ.sort(key=lambda o: (o.start, 0 if o.kind == "discharge" else 1))
     charge_occ = [o for o in occ if o.kind == "charge"]
 
@@ -255,9 +272,7 @@ def make_plan(
 
     def idx(when: datetime) -> int:
         """Index of the first period starting at or after `when` (clamped)."""
-        # Real elapsed time (UTC): local wall-clock arithmetic is wrong on the
-        # days the clocks change.
-        k = math.ceil((when.astimezone(timezone.utc) - starts[0].astimezone(timezone.utc)) / dt)
+        k = math.ceil((when - starts[0]) / dt)
         return min(max(k, 0), n)
 
     # Fill in decisions in time order. `actions[i]` is the SOC target to drive
@@ -268,7 +283,7 @@ def make_plan(
     # End (exclusive) of each period's local day, for the storage-mode rule.
     day_end = [n] * n
     for i in range(n - 2, -1, -1):
-        day_end[i] = day_end[i + 1] if starts[i + 1].date() == starts[i].date() else i + 1
+        day_end[i] = day_end[i + 1] if local_starts[i + 1].date() == local_starts[i].date() else i + 1
 
     def self_use_safe(i: int, soc: float) -> bool:
         """Can the battery take all spare solar from period i without clipping?"""
@@ -336,7 +351,7 @@ def make_plan(
             elif soc_at_end(None) <= limit + 0.5:
                 enabled, reason = False, (
                     f"the house will bring the battery down to {limit:.0f}% by "
-                    f"{o.end.strftime('%H:%M')} on its own")
+                    f"{o.end.astimezone(local).strftime('%H:%M')} on its own")
             elif target > params.discharge_threshold_soc:
                 enabled, reason = False, (
                     f"not worth it: room for {room:.1f} kWh solar only needs "
@@ -344,7 +359,7 @@ def make_plan(
             else:
                 enabled, reason = True, (
                     f"export down to {target}% to make room for {room:.1f} kWh of "
-                    f"solar; the house takes it to {limit:.0f}% by {o.end.strftime('%H:%M')}")
+                    f"solar; the house takes it to {limit:.0f}% by {o.end.astimezone(local).strftime('%H:%M')}")
             if protected:
                 reason += (f" (keeping {keep:.0f}% so the house runs on the battery until the "
                            f"solar takes over; some solar may be clipped)")
@@ -455,7 +470,7 @@ def make_plan(
     soc = simulate(n)
     return Plan(
         windows=plans,
-        soc=[(_later(starts[i], dt), soc[i + 1]) for i in range(n)],
+        soc=[(starts[i] + dt, soc[i + 1]) for i in range(n)],
         modes=list(zip(starts, modes)),
     )
 

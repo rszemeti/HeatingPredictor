@@ -443,7 +443,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
                 if start and end:
                     out.append((dt_util.as_local(start), dt_util.as_local(end), price))
-        return sorted(set(out))
+        return sorted(set(out), key=lambda r: dt_util.as_utc(r[0]))
 
     def _charge_ranges(
         self, o: dict, first: datetime, last: datetime
@@ -491,7 +491,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         low_slots, _ = self._solar_slots(field)
         pv_low = solar_per_period(utc_starts, self.period, low_slots)
         charge_ranges, charge_source = self._charge_ranges(
-            o, starts[0], _later(starts[-1], timedelta(minutes=self.period))
+            o, starts[0], dt_util.as_local(utc_starts[-1] + timedelta(minutes=self.period))
         )
         params = BatteryParams(
             capacity_kwh=float(o[CONF_BATTERY_KWH]),
@@ -545,7 +545,9 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "modes": [(t.isoformat(), m) for t, m in plan.modes],
             },
         }
-        windows = [w.as_dict() for w in plan.windows if w.end > now_local]
+        # The plan is in UTC; from here on, times are for people: local.
+        tz = now_local.tzinfo
+        windows = [w.as_dict(tz) for w in plan.windows if w.end > now_local]
         # The next occurrence of each slot, keyed like "charge_1", "discharge_1".
         slots_next: dict[str, dict] = {}
         for w in windows:
@@ -561,13 +563,13 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # When the inverter next needs updating: shortly before the next window.
         lead = timedelta(minutes=WRITE_LEAD_MINUTES)
         writes = sorted(
-            (_later(w.start, -lead), f"{w.kind}_{w.slot}") for w in plan.windows
-            if _later(w.start, -lead) > now_local
+            (dt_util.as_local(w.start - lead), f"{w.kind}_{w.slot}") for w in plan.windows
+            if w.start - lead > now_local
         )
         next_write = writes[0][0] if writes else None
         next_write_slots = [k for t, k in writes if t == next_write]
         socs = [v for _, v in plan.soc]
-        modes = plan.modes
+        modes = [(dt_util.as_local(t), m) for t, m in plan.modes]
         storage_mode = modes[0][1] if modes else "Self-Use"
         today = now_local.date()
         self_use_from = next(
@@ -591,7 +593,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "next": nxt,
             "min_soc_24h": round(min(socs[: int(24 / dt_h)]), 1) if socs else None,
             "soc_forecast": [
-                {"time": t.isoformat(), "soc": round(v, 1)} for t, v in plan.soc
+                {"time": dt_util.as_local(t).isoformat(), "soc": round(v, 1)} for t, v in plan.soc
             ],
             # For the card only (not exposed as sensor attributes).
             "mode_runs": _mode_runs(modes, timedelta(minutes=self.period)),
