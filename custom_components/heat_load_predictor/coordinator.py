@@ -560,11 +560,23 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "soc_forecast": [
                 {"time": t.isoformat(), "soc": round(v, 1)} for t, v in plan.soc
             ],
-            # For the card only (not exposed as a sensor attribute).
+            # For the card only (not exposed as sensor attributes).
+            "mode_runs": _mode_runs(modes, timedelta(minutes=self.period)),
             "solar": [
                 {"start": t.isoformat(), "kwh": round(k, 3)} for t, k in zip(starts, pv)
             ] if solar_ok else [],
         }
+
+
+def _mode_runs(modes: list[tuple[datetime, str]], dt: timedelta) -> list[dict]:
+    """Collapse per-period storage modes into runs: [{start, end, mode}]."""
+    runs: list[dict] = []
+    for t, m in modes:
+        if runs and runs[-1]["mode"] == m:
+            runs[-1]["end"] = (t + dt).isoformat()
+        else:
+            runs.append({"start": t.isoformat(), "end": (t + dt).isoformat(), "mode": m})
+    return runs
 
 
 def solar_per_period(

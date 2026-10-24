@@ -19,8 +19,8 @@
 const DOMAIN = "heat_load_predictor";
 const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const W = 760, H = 320;
-const M = { l: 46, r: 50, t: 26, b: 30 };
+const W = 760, H = 332;
+const M = { l: 46, r: 50, t: 26, b: 42 };   // bottom: mode strip + time labels
 let PW = W - M.l - M.r;
 const PH = H - M.t - M.b;
 
@@ -228,6 +228,9 @@ class HeatLoadScheduleCard extends HTMLElement {
         .curve { fill: none; stroke: var(--primary-color, #03a9f4); stroke-width: 2.5; }
         .tin { fill: none; stroke: var(--primary-text-color); stroke-width: 1.5; stroke-dasharray: 4 4; opacity: .6; }
         .sun { fill: #f4c430; opacity: .28; }
+        .mode { cursor: default; }
+        .mode.feedin { fill: #1e88e5; }
+        .mode.selfuse { fill: var(--secondary-text-color); opacity: .3; }
         .win.charge { fill: var(--success-color, #43a047); }
         .win.discharge { fill: #ff8f00; }
         .win { opacity: .13; }
@@ -350,7 +353,7 @@ class HeatLoadScheduleCard extends HTMLElement {
     for (let h = 0; h <= 24; h += 3) parts.push(`<line x1="${this._x(h * 60)}" x2="${this._x(h * 60)}" y1="${M.t}" y2="${M.t + PH}"/>`);
     for (let t = Math.ceil(lo); t <= hi; t += 1) parts.push(`<line x1="${M.l}" x2="${M.l + PW}" y1="${this._y(t)}" y2="${this._y(t)}" opacity="${t % 2 ? 0.4 : 1}"/>`);
     parts.push(`</g><g class="axis">`);
-    for (let h = 0; h <= 24; h += 3) parts.push(`<text x="${this._x(h * 60)}" y="${H - 10}" text-anchor="middle">${String(h).padStart(2, "0")}:00</text>`);
+    for (let h = 0; h <= 24; h += 3) parts.push(`<text x="${this._x(h * 60)}" y="${M.t + PH + 28}" text-anchor="middle">${String(h).padStart(2, "0")}:00</text>`);
     for (let t = Math.ceil(lo); t <= hi; t += 2) parts.push(`<text x="${M.l - 6}" y="${this._y(t) + 4}" text-anchor="end">${t}°</text>`);
     for (let k = 0; k <= 4; k++) {
       const v = (kmax * k) / 4;
@@ -426,6 +429,19 @@ class HeatLoadScheduleCard extends HTMLElement {
       if (pts.length > 1) parts.push(`<polyline class="soc" pointer-events="none" points="${pts.join(" ")}"/>`);
     }
 
+    // storage mode strip, just under the plot
+    this._modeShown = [];
+    if (bat && date) {
+      for (const r of bat.mode_runs || []) {
+        const c = this._clip(r.start, r.end, date);
+        if (!c) continue;
+        const i = this._modeShown.push(r) - 1;
+        const x0 = this._x(c[0]), x1 = this._x(c[1]);
+        const cls = r.mode === "Self-Use" ? "selfuse" : "feedin";
+        parts.push(`<rect class="mode ${cls}" data-mode="${i}" x="${x0}" y="${M.t + PH + 2}" width="${Math.max(1, x1 - x0)}" height="6"/>`);
+      }
+    }
+
     // now marker
     if (date && this._forecast?.length && this._forecast[0].start.slice(0, 10) === date) {
       const nowMin = toMin(this._forecast[0].start.slice(11, 16));
@@ -459,6 +475,19 @@ class HeatLoadScheduleCard extends HTMLElement {
       el.addEventListener("mousemove", (e) => this._showTip(e, el.dataset.bar));
       el.addEventListener("mouseleave", () => (this._tip.style.display = "none"));
     });
+    this._svg.querySelectorAll("[data-mode]").forEach((el) => {
+      el.addEventListener("mousemove", (e) => {
+        const r = this._modeShown[Number(el.dataset.mode)];
+        const hm = (iso) => iso.slice(11, 16);
+        const what = r.mode === "Self-Use"
+          ? "Solar goes to the house, then the battery"
+          : "Solar exports first (up to the limit), the battery takes the rest";
+        const end = hm(r.end) === "00:00" ? "24:00" : hm(r.end);
+        this._tip.innerHTML = `<b>${esc(r.mode)}</b> ${hm(r.start)}–${end}<br>${what}`;
+        this._placeTip(e);
+      });
+      el.addEventListener("mouseleave", () => (this._tip.style.display = "none"));
+    });
     this._svg.querySelectorAll("[data-win]").forEach((el) => {
       el.addEventListener("mousemove", (e) => this._showWinTip(e, this._winShown[Number(el.dataset.win)]));
       el.addEventListener("mouseleave", () => (this._tip.style.display = "none"));
@@ -467,7 +496,9 @@ class HeatLoadScheduleCard extends HTMLElement {
     lb.innerHTML = bat ? `<span><span class="sw" style="border-top:2px solid var(--success-color,#43a047)"></span>Battery SOC</span>
       <span><span class="sw" style="height:10px;background:var(--success-color,#43a047);opacity:.25"></span>Charge window</span>
       <span><span class="sw" style="height:10px;background:#ff8f00;opacity:.25"></span>Discharge window</span>
-      ${this._config.show_solar && (bat.solar || []).length ? `<span><span class="sw" style="height:10px;background:#f4c430;opacity:.45"></span>Solar (own scale)</span>` : ""}` : "";
+      ${this._config.show_solar && (bat.solar || []).length ? `<span><span class="sw" style="height:10px;background:#f4c430;opacity:.45"></span>Solar (own scale)</span>` : ""}
+      ${(bat.mode_runs || []).length ? `<span><span class="sw" style="height:6px;background:#1e88e5"></span>Feed-in priority</span>
+      <span><span class="sw" style="height:6px;background:var(--secondary-text-color);opacity:.3"></span>Self-Use</span>` : ""}` : "";
     lb.style.display = bat ? "contents" : "none";
   }
 

@@ -298,3 +298,28 @@ async def test_running_charge_window_is_rewritten_when_plan_changes(hass: HomeAs
     calls.clear()
     await _at(hass, freezer, day, 22, 10)
     assert not _written(calls)
+
+
+async def test_card_gets_storage_mode_runs(hass: HomeAssistant, freezer) -> None:
+    """The card's forecast carries the plan's storage modes as runs, matching
+    the plan sensor's current mode, and they aren't sensor attributes."""
+    import json
+    import os
+
+    day = datetime(2026, 6, 15, tzinfo=LON)
+    await _rig(hass, freezer, day, soc=50, pv_peak=12.0, temp=16.0)
+    await _at(hass, freezer, day, 6, 0)
+    from custom_components.heat_load_predictor import _coordinator, _response
+
+    # What the card's forecast websocket call returns.
+    result = json.loads(json.dumps(_response(_coordinator(hass, None)), default=str))
+    runs = result["battery"]["mode_runs"]
+    assert runs and {r["mode"] for r in runs} <= {"Self-Use", "Feed-in priority"}
+    assert any(r["mode"] == "Feed-in priority" for r in runs)       # a 12 kW day
+    for a, b in zip(runs, runs[1:]):
+        assert a["end"] == b["start"] and a["mode"] != b["mode"]
+    plan = hass.states.get("sensor.heat_pump_battery_plan").attributes
+    assert runs[0]["mode"] == plan["storage_mode"]
+    assert "mode_runs" not in plan
+    if out := os.environ.get("DUMP_CARD_DATA"):
+        pathlib.Path(out).write_text(json.dumps(result))
