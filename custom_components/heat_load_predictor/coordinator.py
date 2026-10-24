@@ -110,6 +110,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._profile: tuple[list[float], float, datetime] | None = None
         # The battery planner's inputs and output from the last run.
         self.plan_inputs: dict | None = None
+        self._warned_gas: set[str] = set()
 
     # ---------------------------------------------------------------- schedule
 
@@ -431,6 +432,15 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         out: list[tuple[datetime, datetime, float]] = []
         for key in (CONF_RATES_TODAY, CONF_RATES_TOMORROW):
             entity_id = self.config_entry.options.get(key)
+            if entity_id and "_gas_" in entity_id:
+                # Gas is priced far below electricity: it would make the whole
+                # day look cheap. Ignore it.
+                if entity_id not in self._warned_gas:
+                    self._warned_gas.add(entity_id)
+                    _LOGGER.warning(
+                        "Ignoring %s for cheap windows: it's a gas tariff. Set the "
+                        "electricity rates event instead.", entity_id)
+                continue
             state = self.hass.states.get(entity_id) if entity_id else None
             for r in (state.attributes.get("rates") if state else None) or []:
                 try:

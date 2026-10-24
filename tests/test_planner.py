@@ -464,11 +464,13 @@ def _replay(name):
 
     d = json.loads((pathlib.Path(__file__).parent / "data" / name).read_text())
     starts = [datetime.fromisoformat(t).astimezone(LON) for t in d["starts"]]
+    ranges = [(datetime.fromisoformat(a), datetime.fromisoformat(b)) for a, b in d["charge_ranges"]] \
+        if d.get("charge_ranges") else None
     return d, starts, pl.make_plan(
         starts=starts, period_minutes=d["period_minutes"], load_kwh=d["load_kwh"], pv_kwh=d["pv_kwh"],
         pv_low_kwh=d["pv_low_kwh"], soc_now=d["soc_now"], params=pl.BatteryParams(**d["params"]),
         charge_windows=pl.parse_windows(d["cheap_windows"]),
-        discharge_windows=pl.parse_windows(d["discharge_windows"]))
+        discharge_windows=pl.parse_windows(d["discharge_windows"]), charge_ranges=ranges)
 
 
 def test_real_plan_across_the_clocks_going_back():
@@ -529,3 +531,13 @@ def test_real_spill_day_buys_only_what_the_house_needs():
         if aft.enabled and aft.start <= t < aft.end:
             grid += pl._charge_split(socs[i], aft.target_soc, d["pv_kwh"][i], d["load_kwh"][i], 0.5, p)[1]
     assert grid < 0.1, grid
+
+
+def test_real_plan_with_learned_baseload():
+    """24 Oct 22:09, real data with the learned baseload (~0.1-0.15 kW at
+    night): on a day the solar will spill, tonight's window doesn't buy, the
+    battery runs the house, and nothing reaches the minimum."""
+    d, starts, plan = _replay("plan_2026-10-24_learned.json")
+    sat = find(plan, "charge", datetime(2026, 10, 24, 22, tzinfo=LON))
+    assert not sat.enabled, sat.reason
+    assert min(v for _, v in plan.soc) > d["params"]["min_soc"] + 1

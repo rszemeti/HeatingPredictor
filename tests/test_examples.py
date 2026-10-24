@@ -345,3 +345,25 @@ async def test_inverter_on_local_time_in_summer(hass: HomeAssistant, freezer) ->
     w = _written(calls)
     assert (w["number.solis8_timed_charge_start_hours_3"], w["number.solis8_timed_charge_end_hours_3"],
             w["number.solis8_timed_charge_end_minutes_3"]) == (22, 23, 59)
+
+
+async def test_gas_rates_entity_is_ignored(hass: HomeAssistant, freezer, caplog) -> None:
+    """A gas rates event set by mistake (gas is far cheaper per kWh) would make
+    the whole day look cheap. It's ignored, with a warning."""
+    day = datetime(2026, 1, 15, tzinfo=LON)
+    await _rig(hass, freezer, day, soc=40, pv_peak=1.5, temp=1.0)
+    elec = ((4, 7), (13, 16), (22, 24))
+    gas = [{"start": day + timedelta(minutes=30 * i), "end": day + timedelta(minutes=30 * (i + 1)),
+            "value_inc_vat": 0.06, "is_capped": False} for i in range(48)]
+    hass.states.async_set("event.octopus_energy_electricity_x_current_day_rates", "1", {"rates": _rates_attr(day, elec)})
+    hass.states.async_set("event.octopus_energy_gas_y_next_day_rates", "1", {"rates": gas})
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+    hass.config_entries.async_update_entry(entry, options={
+        **entry.options,
+        "rates_today_entity": "event.octopus_energy_electricity_x_current_day_rates",
+        "rates_tomorrow_entity": "event.octopus_energy_gas_y_next_day_rates"})
+    await hass.async_block_till_done()
+    plan = hass.states.get("sensor.heat_pump_battery_plan").attributes
+    c1 = plan["slots"]["charge_1"]
+    assert (c1["start"][11:16], c1["end"][11:16]) == ("04:00", "07:00")     # not the whole day
+    assert "gas tariff" in caplog.text
