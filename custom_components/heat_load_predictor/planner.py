@@ -404,13 +404,8 @@ def make_plan(
             # solar allows, rather than gambling on just scraping through.
             just_enough = _lowest_target(lowest, projected, params)
             if just_enough is not None and just_enough > fill_to:
-                # Solar room never wins over staying off the grid at full price.
-                target, enabled = just_enough, True
-                reason = (f"charge to {target}%, above the {fill_to}% solar limit: needed "
-                          f"to stay above {params.reserve_soc:.0f}% until the next cheap "
-                          f"window (some solar may be clipped)")
-                if lowest(target) < params.reserve_soc - 1e-6:
-                    reason += " (charge rate too low to cover it all)"
+                target, enabled, reason = _spill_day_charge(
+                    pv_cautious, load_cautious, a, b, gap_end, projected, dt_h, params, fill_to)
             elif fill_to > projected + 0.5:
                 target, enabled = fill_to, True
                 reason = f"fill to {target}% on cheap power"
@@ -447,18 +442,21 @@ def make_plan(
                     else:
                         lo_t = mid + 1
                 target, short = hi_t, False
-            # Solar room never caps a charge below what's needed.
-            capped = False
-            enabled = True
-            if target > projected + 0.5:
-                reason = f"charge to {target}% to cover {need:.1f} kWh until the next cheap window"
+            # On a day the solar will fill and spill, the reserve gives way to
+            # the spill-day rule; otherwise solar room never caps a charge.
+            if not short and target > upper + 0.5:
+                target, enabled, reason = _spill_day_charge(
+                    pv_cautious, load_cautious, a, b, gap_end, projected, dt_h, params,
+                    int(max(params.min_soc, math.ceil(upper))))
             else:
-                reason = (f"hold at {target}%: run the house on cheap power now, "
-                          f"keep the battery for {need:.1f} kWh after the window")
-            if short:
-                reason += " (charge rate too low to cover it all)"
-            if capped:
-                reason += f"; capped at {target}% to leave room for solar"
+                enabled = True
+                if target > projected + 0.5:
+                    reason = f"charge to {target}% to cover {need:.1f} kWh until the next cheap window"
+                else:
+                    reason = (f"hold at {target}%: run the house on cheap power now, "
+                              f"keep the battery for {need:.1f} kWh after the window")
+                if short:
+                    reason += " (charge rate too low to cover it all)"
         if nxt is None:
             reason += " (next window beyond forecast)"
         plans.append(WindowPlan(o.kind, o.slot, o.start, o.end, enabled, target,
@@ -502,6 +500,29 @@ def _keep_soc(pv, load, a: int, b: int, dt_h: float, p: BatteryParams) -> float:
     return hi
 
 
+def _spill_day_charge(pv, load, a: int, b: int, gap_end: int, projected: float,
+                      dt_h: float, p: BatteryParams, fill_to: int) -> tuple[int, bool, str]:
+    """Charge decision for a window before a day the solar will fill and spill.
+
+    Whatever the battery gives the house now is refilled for free by solar that
+    would otherwise be exported or clipped, so buying to hold the reserve is a
+    waste. The battery only has to carry the house until the solar takes over
+    (or the next cheap window), reaching its minimum no earlier than that, on
+    the cautious forecasts. Returns (target, enabled, reason).
+    """
+    need_now = _keep_soc(pv, load, a, gap_end, dt_h, p)      # skipping the window
+    if projected >= need_now - 1e-6:
+        return fill_to, False, (
+            f"the solar will fill the battery later, so the house runs on the battery: "
+            f"it reaches {p.min_soc:.0f}% no earlier than the solar takes over")
+    need_end = _keep_soc(pv, load, b, gap_end, dt_h, p)      # after the window
+    target = int(max(p.min_soc, math.ceil(need_end)))
+    verb = "charge to" if target > projected + 0.5 else "hold at"
+    return target, True, (
+        f"{verb} {target}%: just enough to carry the house until the solar takes over "
+        f"(the solar will fill the battery later)")
+
+
 def _lowest_target(lowest, projected: float, p: BatteryParams) -> int | None:
     """Smallest whole-% charge target that keeps the battery above the reserve
     until the next cheap window, or None if skipping the window already does."""
@@ -519,6 +540,19 @@ def _lowest_target(lowest, projected: float, p: BatteryParams) -> int | None:
     return hi
 
 
+def _charge_split(soc: float, target: float, pv: float, load: float, dt_h: float,
+                  p: BatteryParams) -> tuple[float, float]:
+    """(solar kWh, grid kWh) into the battery in one period of a timed charge."""
+    cap = p.capacity_kwh
+    spare = max(0.0, pv - load)
+    solar = min(spare, (100 - soc) / 100 * cap)
+    after = soc + solar / cap * 100
+    grid = 0.0
+    if after < target:
+        grid = min(max(0.0, p.charge_power_kw * dt_h - solar), (target - after) / 100 * cap)
+    return solar, grid
+
+
 def _step(
     soc: float, action, pv: float, load: float, dt_h: float, p: BatteryParams,
     feed_in: bool = False,
@@ -530,13 +564,11 @@ def _step(
     """
     cap = p.capacity_kwh
     if action and action[0] == "charge":
-        # Timed charge slot: the house runs from the grid for the whole window,
-        # the battery charges to target and then holds; spare solar still goes in.
-        if soc < action[1]:
-            add = min(p.charge_power_kw * dt_h, (action[1] - soc) / 100 * cap)
-            soc += add / cap * 100
-        spare = max(0.0, pv - load)
-        return min(100.0, soc + spare / cap * 100)
+        # Timed charge slot: the battery doesn't discharge (the house's shortfall
+        # comes from the grid). Spare solar charges it first; the grid only tops
+        # up what the solar doesn't supply, up to the target and the charge rate.
+        solar, grid = _charge_split(soc, action[1], pv, load, dt_h, p)
+        return min(100.0, soc + (solar + grid) / cap * 100)
     if action and action[0] == "discharge" and soc > action[1]:
         take = min(p.discharge_power_kw * dt_h, (soc - action[1]) / 100 * cap)
         return soc - take / cap * 100

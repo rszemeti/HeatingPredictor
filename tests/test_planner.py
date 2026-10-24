@@ -8,6 +8,7 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
+from dataclasses import replace
 
 _spec = importlib.util.spec_from_file_location(
     "hlp_planner",
@@ -127,22 +128,36 @@ def test_solar_room_caps_charge():
     assert m.target_soc <= 100 - (m.room_kwh + params.solar_headroom_kwh) / 32 * 100 + 1
 
 
-def test_staying_off_the_grid_beats_solar_room():
-    """Sunny spring morning on the expected forecast, but the pessimistic one
-    is dull: covering the morning on the cautious figures needs more than the
-    solar room allows. Buying at full price is never good, so the charge wins
-    and some solar may be clipped."""
+def test_spill_day_charges_only_to_carry_the_house_to_the_solar():
+    """Sunny spring day on the expected forecast (the battery will fill and
+    spill), dull on the pessimistic one. Holding the reserve would buy power the
+    solar would replace for free, so the window charges only enough for the
+    battery to reach its minimum no earlier than the (pessimistic) solar takes
+    over the house."""
     start = datetime(2026, 4, 1, 0, tzinfo=LON)
     starts = series(start)
     load = [(2.0 + 0.4) * 0.5 for _ in starts]
     pv = [bell(t, 14.0) * 0.5 for t in starts]
+    pv_low = [x * 0.3 for x in pv]
     params = pl.BatteryParams(discharge_threshold_soc=0)
     plan = pl.make_plan(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv,
-                        pv_low_kwh=[x * 0.3 for x in pv], soc_now=20, params=params,
+                        pv_low_kwh=pv_low, soc_now=20, params=params,
                         charge_windows=COSY, discharge_windows=NIGHT)
     m = find(plan, "charge", datetime(2026, 4, 1, 4, tzinfo=LON))
-    assert m.enabled and m.target_soc > 100 - (m.room_kwh + params.solar_headroom_kwh) / 32 * 100 + 1
-    assert "solar limit" in m.reason
+    assert m.enabled and "until the solar takes over" in m.reason, m.reason
+    # Replay on the cautious figures: never below the minimum before 13:00.
+    load_c = [x * 1.1 for x in load]
+    i0 = starts.index(m.start)
+    s = m.projected_soc
+    for i in range(i0, len(starts)):
+        t = starts[i]
+        if t >= datetime(2026, 4, 1, 13, tzinfo=LON):
+            break
+        act = ("charge", m.target_soc) if t < m.end else None
+        s = pl._step(s, act, pv_low[i], load_c[i], 0.5, replace(params, min_soc=0))
+        assert s >= params.min_soc - 0.5, (t, s)
+    # And it doesn't hold the reserve: the cautious path dips below it.
+    assert m.target_soc < 40
 
 
 def test_full_battery_needs_no_charge():
@@ -473,3 +488,44 @@ def test_real_plan_across_the_clocks_going_back():
     assert min(v for _, v in plan.soc) >= d["params"]["reserve_soc"] - 0.5
     sun = find(plan, "discharge", datetime(2026, 10, 25, 0, 30, tzinfo=LON))
     assert not sun.enabled, sun.reason
+
+
+def test_charge_window_uses_solar_before_grid():
+    """A Solis timed charge takes spare solar first; the grid only tops up."""
+    p = pl.BatteryParams()
+    # 3 kWh spare solar this half-hour, target 100 from 50%: solar covers 3 kWh,
+    # the grid the rest up to the 2.5 kWh charge rate.
+    solar, grid = pl._charge_split(50, 100, 3.3, 0.3, 0.5, p)
+    assert solar == pytest.approx(3.0) and grid == 0.0
+    solar, grid = pl._charge_split(50, 100, 1.3, 0.3, 0.5, p)
+    assert solar == pytest.approx(1.0) and grid == pytest.approx(1.5)
+    # Already at target: the grid adds nothing, the solar still goes in.
+    solar, grid = pl._charge_split(80, 60, 1.3, 0.3, 0.5, p)
+    assert solar == pytest.approx(1.0) and grid == 0.0
+
+
+def test_real_spill_day_buys_only_what_the_house_needs():
+    """Regression (24 Oct evening, real data): Solcast's median fills the
+    battery by 12:30 on Sunday and clips. 0.3.11 charged to 45% at 22:00 and
+    held 30% from 04:00 to keep the 25% reserve: power the solar would have
+    replaced for free. Now the windows only stop the battery reaching 15%
+    before the solar takes over, and the 13:00 window buys nothing while
+    solar is spilling."""
+    d, starts, plan = _replay("plan_2026-10-24_evening.json")
+    p = pl.BatteryParams(**d["params"])
+    sat = find(plan, "charge", datetime(2026, 10, 24, 22, tzinfo=LON))
+    assert sat.target_soc <= math.ceil(sat.projected_soc), sat.reason      # no charge above now
+    sun = find(plan, "charge", datetime(2026, 10, 25, 4, tzinfo=timezone.utc))
+    assert sun.target_soc < p.reserve_soc, sun.reason
+    assert "until the solar takes over" in sun.reason
+    # Expected path never touches the minimum.
+    assert min(v for _, v in plan.soc) > p.min_soc + 1
+    # Grid bought in the 13:00 window: none, the solar fills it.
+    aft = find(plan, "charge", datetime(2026, 10, 25, 13, tzinfo=timezone.utc))
+    soc = d["soc_now"]
+    grid = 0.0
+    socs = [d["soc_now"]] + [v for _, v in plan.soc]
+    for i, t in enumerate(starts):
+        if aft.enabled and aft.start <= t < aft.end:
+            grid += pl._charge_split(socs[i], aft.target_soc, d["pv_kwh"][i], d["load_kwh"][i], 0.5, p)[1]
+    assert grid < 0.1, grid
