@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -61,6 +62,7 @@ from .const import (
     SOLAR_CONFIDENCE_FIELD,
     WRITE_LEAD_MINUTES,
     STORAGE_VERSION,
+    VERSION,
 )
 from .learn import base_profile, half_hour_means, slot_of
 from .planner import BatteryParams, cheap_ranges, make_plan, occurrences, parse_windows
@@ -106,6 +108,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._battery_error: str | None = None
         # Learned baseload: (48 half-hourly kW values, days of data, when).
         self._profile: tuple[list[float], float, datetime] | None = None
+        # The battery planner's inputs and output from the last run.
+        self.plan_inputs: dict | None = None
 
     # ---------------------------------------------------------------- schedule
 
@@ -513,6 +517,34 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             discharge_windows=parse_windows(o[CONF_DISCHARGE_WINDOWS]),
             charge_ranges=charge_ranges,
         )
+        # Everything the planner saw, for "Download planning data" on the card.
+        self.plan_inputs = {
+            "version": VERSION,
+            "made_at": now_local.isoformat(),
+            "period_minutes": self.period,
+            "starts": [t.isoformat() for t in starts],
+            "heat_kwh": [round(r.elec_kwh, 4) for r in results],
+            "base_kwh": [round(b, 4) for b in base],
+            "baseload_from": base_source,
+            "load_kwh": [round(x, 4) for x in load],
+            "pv_kwh": [round(x, 4) for x in pv],
+            "pv_low_kwh": [round(x, 4) for x in pv_low],
+            "solar_field_low": field,
+            "solar_slots": [(t.isoformat(), kw) for t, kw in slots],
+            "soc_now": soc_now,
+            "params": asdict(params),
+            "cheap_windows": o[CONF_CHEAP_WINDOWS],
+            "discharge_windows": o[CONF_DISCHARGE_WINDOWS],
+            "charge_ranges": [(a.isoformat(), b.isoformat()) for a, b in charge_ranges]
+            if charge_ranges is not None else None,
+            "charge_windows_from": charge_source,
+            "options": {k: v for k, v in o.items() if isinstance(v, (str, int, float, bool)) or v is None},
+            "plan": {
+                "windows": [w.as_dict() for w in plan.windows],
+                "soc": [(t.isoformat(), round(v, 2)) for t, v in plan.soc],
+                "modes": [(t.isoformat(), m) for t, m in plan.modes],
+            },
+        }
         windows = [w.as_dict() for w in plan.windows if w.end > now_local]
         # The next occurrence of each slot, keyed like "charge_1", "discharge_1".
         slots_next: dict[str, dict] = {}

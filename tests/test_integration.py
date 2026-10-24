@@ -401,3 +401,34 @@ async def test_plan_recommends_storage_mode(hass: HomeAssistant, fake_weather) -
     a = hass.states.get("sensor.heat_pump_battery_plan").attributes
     assert a["storage_mode"] == "Self-Use"
 
+
+
+async def test_plan_data_download_replays_to_the_same_plan(hass: HomeAssistant, fake_weather, hass_ws_client) -> None:
+    """The card's "Download planning data" gives everything needed to rerun
+    the planner offline and get the same plan."""
+    import json
+    from datetime import datetime as _dt
+
+    from custom_components.heat_load_predictor import planner as pl
+
+    hass.states.async_set("sensor.battery_soc", "40", {"unit_of_measurement": "%"})
+    await _setup(hass, {**OPTIONS, **BATTERY})
+    client = await hass_ws_client(hass)
+    await client.send_json({"id": 1, "type": f"{DOMAIN}/plan_data"})
+    msg = await client.receive_json()
+    assert msg["success"], msg
+    d = json.loads(json.dumps(msg["result"]))
+    assert d["soc_now"] == 40 and len(d["starts"]) == len(d["load_kwh"]) == len(d["pv_kwh"])
+    starts = [_dt.fromisoformat(t) for t in d["starts"]]
+    ranges = [(_dt.fromisoformat(a), _dt.fromisoformat(b)) for a, b in d["charge_ranges"]] \
+        if d["charge_ranges"] is not None else None
+    plan = pl.make_plan(
+        starts=starts, period_minutes=d["period_minutes"], load_kwh=d["load_kwh"],
+        pv_kwh=d["pv_kwh"], pv_low_kwh=d["pv_low_kwh"], soc_now=d["soc_now"],
+        params=pl.BatteryParams(**d["params"]),
+        charge_windows=pl.parse_windows(d["cheap_windows"]),
+        discharge_windows=pl.parse_windows(d["discharge_windows"]), charge_ranges=ranges,
+    )
+    got = [(w.start.isoformat(), w.enabled, w.target_soc) for w in plan.windows]
+    want = [(w["start"], w["enabled"], w["target_soc"]) for w in d["plan"]["windows"]]
+    assert got == want

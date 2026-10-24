@@ -77,6 +77,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, ws_get_schedule)
     websocket_api.async_register_command(hass, ws_set_schedule)
     websocket_api.async_register_command(hass, ws_forecast)
+    websocket_api.async_register_command(hass, ws_plan_data)
 
     async def set_schedule(call: ServiceCall) -> None:
         coord = _coordinator(hass, call.data.get(ATTR_ENTRY))
@@ -233,3 +234,20 @@ def ws_forecast(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
         connection.send_error(msg["id"], "not_found", _not_found_message(hass))
         return
     connection.send_result(msg["id"], _response(coord))
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/plan_data", vol.Optional("entry_id"): str}
+)
+@callback
+def ws_plan_data(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Everything the battery planner saw on its last run, and what it decided."""
+    try:
+        coord = _coordinator(hass, msg.get("entry_id"))
+    except ServiceValidationError:
+        connection.send_error(msg["id"], "not_found", _not_found_message(hass))
+        return
+    if not coord.plan_inputs:
+        connection.send_error(msg["id"], "no_plan", "The battery planner hasn't made a plan yet.")
+        return
+    connection.send_result(msg["id"], coord.plan_inputs)

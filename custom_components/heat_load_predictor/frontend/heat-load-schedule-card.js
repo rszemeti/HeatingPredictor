@@ -590,10 +590,32 @@ class HeatLoadScheduleCard extends HTMLElement {
       : "No forecast for this day yet";
     const msg = this._msg ? `<span class="msg ${this._msg.bad ? "bad" : ""}">${esc(this._msg.text)}</span>` : "";
     r.querySelector(".footer").innerHTML = `<span class="total">${totalTxt}</span>${msg}<span class="spacer"></span>
+      ${this._battery ? `<button data-plandata title="Save everything the battery planner used for its last plan, as a JSON file">Download planning data</button>` : ""}
       <button data-revert ${this._dirty && !this._busy ? "" : "disabled"}>Revert</button>
       <button class="primary" data-save ${this._dirty && !this._busy ? "" : "disabled"}>${this._busy ? "Saving…" : "Save"}</button>`;
     r.querySelector("[data-save]").onclick = () => this._save();
     r.querySelector("[data-revert]").onclick = () => this._revert();
+    const pd = r.querySelector("[data-plandata]");
+    if (pd) pd.onclick = () => this._downloadPlanData();
+  }
+
+  async _downloadPlanData() {
+    try {
+      const data = await this._ws("plan_data");
+      const text = JSON.stringify(data, null, 1);
+      const stamp = (data.made_at || new Date().toISOString()).slice(0, 16).replace(/[:]/g, "");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+      a.download = `battery-plan-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      this._flash("Planning data downloaded");
+      this._renderFooter();
+    } catch (err) {
+      this._flash(`Couldn't get the planning data: ${err.message || err}`, true);
+      this._renderFooter();
+    }
   }
 
   // ------------------------------------------------------------------ drag
