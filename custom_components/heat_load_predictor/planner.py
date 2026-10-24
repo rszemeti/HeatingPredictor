@@ -4,14 +4,16 @@ Given per-period forecasts of house load (heat pump + baseload) and solar, the
 battery state of charge now, and a set of daily windows, decide for each
 upcoming window:
 
-* Cheap (charge) windows: charge from the grid to the lowest SOC that still
-  reaches the next cheap window at the reserve SOC. The shortfall is the worst
-  point of the running balance (solar in, load out) across the gap.
-* Discharge windows: discharge to make room for solar the inverter can neither
-  use nor export. Room needed is the peak of the running balance of solar
-  beyond (load + export limit), less what the house draws in between, plus a
-  fixed headroom. If the resulting target is above the threshold, discharging
-  isn't worth it and the window is skipped.
+* Cheap (charge) windows: fill as far as the next day's solar allows (or, if
+  fill_cheap_windows is off, to the lowest SOC that still reaches the next
+  cheap window at the reserve SOC, found by simulation).
+* Discharge windows: make room for solar the inverter can neither use nor
+  export. The limit is the highest SOC at window end from which no solar is
+  lost, counting what the house draws before the surplus arrives, less a
+  fixed headroom. The export stops at the highest target from which the
+  house's own use still brings the battery to that limit by window end. If
+  the house gets there on its own, or the target is above the threshold, the
+  window is skipped.
 * Solar room wins: a charge window is capped at the room the solar needs, and a
   charge window that overlaps an active discharge window is switched off.
 
@@ -289,17 +291,43 @@ def make_plan(
         projected = simulate(max(a, 0))[-1]
 
         if o.kind == "discharge":
-            room = _room_needed(pv_kwh, load_kwh, b, b + day_periods, dt_h, params)
-            raw = 100 - (room + params.solar_headroom_kwh) / cap * 100
-            target = int(max(params.min_soc, 5 * round(raw / 5)))
-            if target > params.discharge_threshold_soc:
+            room = _room_at(pv_kwh, load_kwh, b, b + day_periods, dt_h, params)
+            # Highest SOC the battery may hold when the window ends.
+            limit = max(params.min_soc, 100 - (room + params.solar_headroom_kwh) / cap * 100)
+
+            def soc_at_end(t: float | None) -> float:
+                s_ = projected
+                for i in range(max(a, 0), b):
+                    s_ = _step(s_, ("discharge", t) if t is not None else None,
+                               pv_kwh[i], load_kwh[i], dt_h, params)
+                return s_
+
+            # The export stops at the target and the house keeps drawing the
+            # battery down after that, so pick the highest target that still
+            # ends the window at the limit: export only what the house won't use.
+            target = int(math.floor(limit))
+            lo_t, hi_t = target, max(target, int(math.ceil(projected)))
+            while lo_t < hi_t:
+                mid = (lo_t + hi_t + 1) // 2
+                if soc_at_end(mid) <= limit + 1e-6:
+                    lo_t = mid
+                else:
+                    hi_t = mid - 1
+            target = int(max(params.min_soc, lo_t))
+            if room <= 0:
+                enabled, reason = False, "not worth it: no solar beyond what the house and export can take"
+            elif soc_at_end(None) <= limit + 0.5:
+                enabled, reason = False, (
+                    f"the house will bring the battery down to {limit:.0f}% by "
+                    f"{o.end.strftime('%H:%M')} on its own")
+            elif target > params.discharge_threshold_soc:
                 enabled, reason = False, (
                     f"not worth it: room for {room:.1f} kWh solar only needs "
                     f"{target}%")
-            elif projected <= target + 0.5:
-                enabled, reason = False, f"battery already at or below {target}%"
             else:
-                enabled, reason = True, f"make room for {room:.1f} kWh of solar"
+                enabled, reason = True, (
+                    f"export down to {target}% to make room for {room:.1f} kWh of "
+                    f"solar; the house takes it to {limit:.0f}% by {o.end.strftime('%H:%M')}")
             plans.append(WindowPlan(o.kind, o.slot, o.start, o.end, enabled, target,
                                     projected, 0.0, room, reason))
             if enabled:
@@ -326,7 +354,7 @@ def make_plan(
             return low
 
         need = _worst_shortfall(pv_cautious, load_cautious, b, gap_end)
-        room = _room_needed(pv_kwh, load_kwh, b, b + day_periods, dt_h, params)
+        room = _room_at(pv_kwh, load_kwh, b, b + day_periods, dt_h, params)
         upper = 100 - (room + (params.solar_headroom_kwh if room > 0 else 0)) / cap * 100
         overlaps = any(s < o.end and o.start < e for s, e in discharging)
         skip_low = lowest(None)
@@ -486,6 +514,46 @@ def _worst_shortfall(pv, load, a: int, b: int) -> float:
         bal += pv[i] - load[i]
         low = min(low, bal)
     return -low
+
+
+def _room_at(pv, load, a: int, b: int, dt_h: float, p: BatteryParams) -> float:
+    """Free space (kWh) the battery needs at the start of period a.
+
+    The highest SOC at a from which no solar is lost over [a, b), with export
+    first up to the limit and the battery taking only the excess, while the
+    house draws the battery down whenever solar falls short. Unlike
+    `_room_needed`, what the house uses before the solar arrives counts: a
+    battery left at 60% at 05:30 may be at 50% by the time there's spare solar.
+    """
+    cap = p.capacity_kwh
+    floor = p.min_soc / 100 * cap
+    lim = p.export_limit_kw * dt_h
+
+    def lost(stored: float) -> float:
+        out = 0.0
+        for i in range(a, min(b, len(pv))):
+            surplus = pv[i] - load[i]
+            if surplus > lim:
+                stored += surplus - lim
+                if stored > cap:
+                    out += stored - cap
+                    stored = cap
+            elif surplus < 0 and stored > floor:
+                stored = max(floor, stored + surplus)
+        return out
+
+    if lost(cap) < CLIP_TOLERANCE_KWH:
+        return 0.0
+    lo, hi = 0.0, cap                 # lost(lo) small, lost(hi) not
+    if lost(lo) >= CLIP_TOLERANCE_KWH:
+        return cap
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if lost(mid) < CLIP_TOLERANCE_KWH:
+            lo = mid
+        else:
+            hi = mid
+    return cap - lo
 
 
 def _room_needed(pv, load, a: int, b: int, dt_h: float, p: BatteryParams) -> float:

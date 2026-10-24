@@ -380,3 +380,45 @@ def test_fill_skips_when_already_at_solar_limit():
                         params=pl.BatteryParams(load_margin_pct=0), hours=30)
     w = find(plan, "charge", datetime(2026, 6, 20, 22, tzinfo=LON))
     assert not w.enabled, w.reason
+
+
+def _sunday(peak):
+    start = datetime(2026, 10, 24, 23, 30, tzinfo=LON)
+    starts = series(start, hours=30)
+    load = [0.6 * 0.5 for _ in starts]
+    pv = [bell(t, peak, rise=8, fall=17) * 0.5 for t in starts]
+    plan = pl.make_plan(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=52,
+                        params=pl.BatteryParams(), charge_windows=COSY, discharge_windows=NIGHT)
+    return plan, starts, load, pv
+
+
+def test_discharge_counts_what_the_house_uses_afterwards():
+    """Regression (24 Oct): a big Sunday needed room, and the plan exported
+    from 00:30 straight to the 15% floor by 02:00, leaving the house and heat
+    pump on the grid until the solar arrived. The export now stops higher and
+    the house's own use takes the battery down to the limit by window end."""
+    plan, starts, load, pv = _sunday(12.0)
+    d = find(plan, "discharge", datetime(2026, 10, 25, 0, 30, tzinfo=LON))
+    assert d.enabled and d.target_soc > 15, d.reason
+    soc = dict(plan.soc)
+    end = datetime(2026, 10, 25, 5, 30, tzinfo=LON)
+    # Not on the floor before the window ends...
+    assert min(v for t, v in plan.soc if t < end) > 15 + 0.5
+    # ...and still at or under the solar limit at window end.
+    room = pl._room_at(pv, load, starts.index(end), starts.index(end) + 48, 0.5, pl.BatteryParams())
+    assert soc[end] <= 100 - (room + 2.6) / 32 * 100 + 0.5
+
+
+def test_no_discharge_when_the_house_makes_the_room():
+    plan, *_ = _sunday(9.5)
+    d = find(plan, "discharge", datetime(2026, 10, 25, 0, 30, tzinfo=LON))
+    assert not d.enabled and "on its own" in d.reason, d.reason
+
+
+def test_room_at_credits_overnight_use():
+    p = pl.BatteryParams()
+    # 4 h of 1 kW load, then 4 h of 3 kW beyond house + export.
+    pv = [0.0] * 8 + [(1 + 5 + 3) * 0.5] * 8
+    load = [0.5] * 16
+    assert pl._room_needed(pv, load, 0, 16, 0.5, p) == pytest.approx(12.0)
+    assert pl._room_at(pv, load, 0, 16, 0.5, p) == pytest.approx(12.0 - 4.0, abs=0.15)   # within the clipping tolerance
