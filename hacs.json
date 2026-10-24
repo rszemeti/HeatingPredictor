@@ -1,7 +1,5 @@
 {
   "name": "Heat Load Predictor",
   "homeassistant": "2025.1.0",
-  "render_readme": true,
-  "zip_release": true,
-  "filename": "heat_load_predictor.zip"
+  "render_readme": true
 }
