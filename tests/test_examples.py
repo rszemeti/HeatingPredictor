@@ -98,13 +98,17 @@ def _written(calls):
     return out
 
 
+# Tests written for one inverter slot per window.
+MULTI = {"use_single_slot": False}
+
+
 def _slot(hass, key):
     return hass.states.get("sensor.heat_pump_battery_plan").attributes["slots"][key]
 
 
 async def test_winter_day(hass: HomeAssistant, freezer) -> None:
     day = datetime(2026, 1, 15, tzinfo=LON)
-    calls = await _rig(hass, freezer, day, soc=40, pv_peak=1.5, temp=1.0)
+    calls = await _rig(hass, freezer, day, soc=40, pv_peak=1.5, temp=1.0, variables=MULTI)
 
     await _at(hass, freezer, day, 0, 25)
     w = _written(calls)
@@ -118,7 +122,7 @@ async def test_winter_day(hass: HomeAssistant, freezer) -> None:
     assert (w["number.solis8_timed_charge_start_hours"], w["number.solis8_timed_charge_end_hours"]) == (4, 7)
     # What was written must match the decision the automation logged.
     log = next(m for e, m in calls if e == "log" and "charge_1" in m)
-    on = "charge_1: ON" in log
+    on = "): ON" in log
     assert bool(w["number.solis8_timed_charge_discharge_on_off"] & 1) == on
     if on:
         assert f"to {w['number.solis8_timed_charge_soc']}%" in log
@@ -134,7 +138,7 @@ async def test_winter_day(hass: HomeAssistant, freezer) -> None:
     assert w["number.solis8_timed_charge_discharge_on_off"] & 4      # a cold night needs charge
     assert 20 < w["number.solis8_timed_charge_soc_3"] <= 100
     logs = [m for e, m in calls if e == "log"]
-    assert logs and "Battery plan charge_3: ON" in logs[-1]
+    assert logs and "Battery plan charge_3 ->" in logs[-1] and "): ON" in logs[-1]
 
 
 async def test_big_solar_day(hass: HomeAssistant, freezer) -> None:
@@ -155,7 +159,7 @@ async def test_big_solar_day(hass: HomeAssistant, freezer) -> None:
 
 async def test_plan_unavailable_falls_back(hass: HomeAssistant, freezer) -> None:
     day = datetime(2026, 1, 15, tzinfo=LON)
-    calls = await _rig(hass, freezer, day, soc=40, pv_peak=1.5, temp=1.0, with_soc=False)
+    calls = await _rig(hass, freezer, day, soc=40, pv_peak=1.5, temp=1.0, with_soc=False, variables=MULTI)
     assert hass.states.get("sensor.heat_pump_battery_plan").state == "unavailable"
     await _at(hass, freezer, day, 0, 25)
     assert _written(calls)["number.solis8_timed_charge_discharge_on_off"] & 64 == 0
@@ -248,7 +252,7 @@ async def test_windows_follow_octopus_rates(hass: HomeAssistant, freezer) -> Non
 
     day = datetime(2026, 1, 15, tzinfo=LON)
     moved = ((3, 6), (12, 14.5), (21, 23))
-    calls = await _rig(hass, freezer, day, soc=40, pv_peak=1.5, temp=1.0)
+    calls = await _rig(hass, freezer, day, soc=40, pv_peak=1.5, temp=1.0, variables=MULTI)
     hass.states.async_set("event.octopus_today", "2026-01-15", {"rates": _rates_attr(day, moved)})
     entry = hass.config_entries.async_entries(DOMAIN)[0]
     hass.config_entries.async_update_entry(entry, options={**entry.options, "rates_today_entity": "event.octopus_today"})
@@ -284,7 +288,7 @@ async def test_running_charge_window_is_rewritten_when_plan_changes(hass: HomeAs
     nothing looked at it again. If the plan changes while a charge window is
     running, the automation writes the new decision within 5 minutes."""
     day = datetime(2026, 10, 23, tzinfo=LON)
-    calls = await _rig(hass, freezer, day, soc=60, pv_peak=1.0, temp=10.0)
+    calls = await _rig(hass, freezer, day, soc=60, pv_peak=1.0, temp=10.0, variables=MULTI)
     await _at(hass, freezer, day, 21, 50)
     # Pretend the inverter holds a stale 'off' for slot 3 (as 0.3.2 wrote it).
     hass.states.async_set("number.solis8_timed_charge_discharge_on_off", "0")
@@ -331,7 +335,7 @@ async def test_inverter_on_utc_in_summer(hass: HomeAssistant, freezer) -> None:
     window is written as 21:00-23:00 inverter time."""
     day = datetime(2026, 6, 15, tzinfo=LON)
     calls = await _rig(hass, freezer, day, soc=30, pv_peak=1.0, temp=12.0,
-                       variables={"inverter_uses_local_time": False})
+                       variables={**MULTI, "inverter_uses_local_time": False})
     await _at(hass, freezer, day, 21, 50)
     w = _written(calls)
     assert (w["number.solis8_timed_charge_start_hours_3"], w["number.solis8_timed_charge_start_minutes_3"]) == (21, 0)
@@ -340,7 +344,7 @@ async def test_inverter_on_utc_in_summer(hass: HomeAssistant, freezer) -> None:
 
 async def test_inverter_on_local_time_in_summer(hass: HomeAssistant, freezer) -> None:
     day = datetime(2026, 6, 15, tzinfo=LON)
-    calls = await _rig(hass, freezer, day, soc=30, pv_peak=1.0, temp=12.0)
+    calls = await _rig(hass, freezer, day, soc=30, pv_peak=1.0, temp=12.0, variables=MULTI)
     await _at(hass, freezer, day, 21, 50)
     w = _written(calls)
     assert (w["number.solis8_timed_charge_start_hours_3"], w["number.solis8_timed_charge_end_hours_3"],
@@ -367,3 +371,60 @@ async def test_gas_rates_entity_is_ignored(hass: HomeAssistant, freezer, caplog)
     c1 = plan["slots"]["charge_1"]
     assert (c1["start"][11:16], c1["end"][11:16]) == ("04:00", "07:00")     # not the whole day
     assert "gas tariff" in caplog.text
+
+
+
+async def test_single_slot_carries_every_window(hass: HomeAssistant, freezer) -> None:
+    """Single-slot mode: each cheap window goes into charge slot 1 just before
+    it starts; slots 2 and 3 are never written. (Bits left alone here.)"""
+    day = datetime(2026, 1, 15, tzinfo=LON)
+    calls = await _rig(hass, freezer, day, soc=40, pv_peak=1.5, temp=1.0,
+                       variables={"clear_unused_slots": False})
+    hass.states.async_set("number.solis8_timed_charge_discharge_on_off", str(2 | 4))   # stale 2 and 3 bits
+    seen = {}
+    for hh, mm, start in ((3, 50, 4), (12, 50, 13), (21, 50, 22)):
+        calls.clear()
+        await _at(hass, freezer, day, hh, mm)
+        w = _written(calls)
+        assert not any(e.endswith(("_2", "_3")) for e in w), w
+        assert w["number.solis8_timed_charge_start_hours"] == start
+        mask = w["number.solis8_timed_charge_discharge_on_off"]
+        assert mask & 6 == 6                                   # left as they were
+        seen[start] = (w.get("number.solis8_timed_charge_soc"), bool(mask & 1))
+    assert seen[22][1]                                         # a cold night charges
+    assert w["number.solis8_timed_charge_end_hours"] == 23 and w["number.solis8_timed_charge_end_minutes"] == 59
+
+
+async def test_single_slot_can_clear_unused_slots(hass: HomeAssistant, freezer) -> None:
+    day = datetime(2026, 1, 15, tzinfo=LON)
+    calls = await _rig(hass, freezer, day, soc=40, pv_peak=1.5, temp=1.0)   # default: clear
+    hass.states.async_set("number.solis8_timed_charge_discharge_on_off", str(2 | 4 | 64))
+    calls.clear()
+    await _at(hass, freezer, day, 3, 50)
+    mask = _written(calls)["number.solis8_timed_charge_discharge_on_off"]
+    assert mask & 62 == 0 and mask & 64                        # 2-6 off, discharge bit untouched
+
+
+async def test_single_slot_recheck_rewrites_slot_1(hass: HomeAssistant, freezer) -> None:
+    """A running window whose slot 1 holds another window's times is rewritten."""
+    day = datetime(2026, 1, 15, tzinfo=LON)
+    calls = await _rig(hass, freezer, day, soc=40, pv_peak=1.5, temp=1.0)
+    await _at(hass, freezer, day, 21, 50)
+    hass.states.async_set("number.solis8_timed_charge_start_hours", "13")      # stale
+    calls.clear()
+    await _at(hass, freezer, day, 22, 5)
+    assert _written(calls)["number.solis8_timed_charge_start_hours"] == 22
+
+
+async def test_discharge_stop_ignores_a_disabled_discharge(hass: HomeAssistant, freezer) -> None:
+    """24-26 Oct: a stale discharge bit with the plan's discharge off made the
+    discharge-stop job fire every 2 minutes. It now needs the plan to enable it."""
+    day = datetime(2026, 1, 15, tzinfo=LON)                    # winter: discharge not worth it
+    calls = await _rig(hass, freezer, day, soc=40, pv_peak=1.5, temp=1.0)
+    await _at(hass, freezer, day, 0, 25)
+    assert not _slot(hass, "discharge_1")["enabled"]
+    hass.states.async_set("number.solis8_timed_charge_discharge_on_off", "64")
+    calls.clear()
+    await _at(hass, freezer, day, 1, 2)
+    assert not any(e == "push" for e, _ in calls)
+    assert hass.states.get("number.solis8_timed_charge_discharge_on_off").state == "64"

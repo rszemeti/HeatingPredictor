@@ -204,6 +204,8 @@ The integration only plans. One automation, [`examples/solis/battery_control.yam
 - **Stop discharging at the target.** During the discharge window it switches the slot off once the battery reaches its target, so the inverter doesn't import from the grid to hold that level.
 - **Set the storage mode.** Every 30 minutes it sets the mode the plan recommends (`storage_mode` on the plan sensor), with grid charging allowed in both. If the plan is unavailable, it falls back to comparing the remaining solar forecast with the battery's free space. Check that the inverter's force-charge SOC is below your minimum SOC, or Self-Use will top the battery up from the grid whenever it reaches the floor.
 
+By default (`use_single_slot: true`) every cheap window goes into charge slot 1, rewritten about 10 minutes before each window, and the on/off bits of charge slots 2–6 are cleared (`clear_unused_slots: true`) so whatever times those slots hold can't charge. Slots 2–6 themselves are never read or written, which avoids integrations whose mapping of the other slots is unreliable. Set `use_single_slot: false` to give each window its own slot. The automation keeps its last 30 traces, and every write is logged with the slot and the trigger that caused it.
+
 Window times are written in the inverter's clock. If your inverter stays on GMT/UTC all year, set `inverter_uses_local_time: false` in the automation's variables, and summer windows are written an hour earlier to match.
 
 The planner works in UTC throughout, so clock changes don't move anything. Times are shown in local time on the card and sensors.

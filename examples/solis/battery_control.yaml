@@ -4,7 +4,8 @@ description: >
   battery plan. Three jobs, chosen by trigger:
   1. Apply plan - at the plan's "next inverter update" time (shortly before each
      window, wherever the tariff puts it) copy each window due in the next 20
-     minutes into its Solis slot: times, target SOC and on/off. Every 5 minutes,
+     minutes into its Solis slot: times, target SOC and on/off. With
+     use_single_slot (the default) every cheap window uses charge slot 1. Every 5 minutes,
      if the plan for a charge window that's already running has changed, write
      it again. If the plan is
      unavailable, fixed Cosy-time triggers keep discharge off and charge to 80%.
@@ -52,6 +53,15 @@ variables:
   # The inverter's clock: true if it follows UK time (BST in summer), false if
   # it stays on GMT/UTC all year. Window times are written in the inverter's time.
   inverter_uses_local_time: true
+  # Use only charge slot 1 for every cheap window (rewritten ~10 minutes before
+  # each one) and keep charge slots 2-6 switched off. Safer where an integration
+  # maps the other slots unreliably. Set false to give each window its own slot.
+  use_single_slot: true
+  # With use_single_slot, also clear the on/off bits of charge slots 2-6 in the
+  # bitmask register on every write, so whatever times those slots hold, they
+  # can't charge. Only the bitmask is written; slots 2-6 themselves are never
+  # read or written. Set false to leave their bits as they are.
+  clear_unused_slots: true
   plan_ok: "{{ states(plan_entity) not in ['unavailable', 'unknown'] and state_attr(plan_entity, 'slots') is mapping }}"
 actions:
   - choose:
@@ -69,29 +79,39 @@ actions:
               # changed since it was written (e.g. the house used more than
               # forecast), so the decision is never stuck for the whole window.
               due: >-
-                {% set ns = namespace(keys=[]) %}
+                {% set ns = namespace(keys=[], first=none, first_t=none) %}
                 {% set mask = states(mask_entity) | int(0) %}
                 {% for key, w in (state_attr(plan_entity, 'slots') or {}).items() %}
                   {% set mins = (as_timestamp(w.start) - as_timestamp(now())) / 60 %}
-                  {% set slot = key.split('_')[1] | int %}
+                  {% set charge = key.startswith('charge') %}
+                  {% set slot = 1 if (use_single_slot and charge) else key.split('_')[1] | int %}
                   {% set sfx = '' if slot == 1 else '_' ~ slot %}
                   {% set on = mask | bitwise_and(2 ** (slot - 1)) > 0 %}
                   {% set soc_set = states('number.solis8_timed_charge_soc' ~ sfx) | int(-1) %}
-                  {% set running = key.startswith('charge') and mins <= 0
-                     and as_timestamp(w.end) > as_timestamp(now()) %}
-                  {% set changed = on != w.enabled or (w.enabled and soc_set != w.target_soc | int) %}
+                  {% set start_set = states('number.solis8_timed_charge_start_hours' ~ sfx) | int(-1) %}
+                  {% set start_h = as_timestamp(w.start) | timestamp_custom('%H', inverter_uses_local_time) | int %}
+                  {% set running = charge and mins <= 0 and as_timestamp(w.end) > as_timestamp(now()) %}
+                  {% set changed = on != w.enabled or start_set != start_h
+                     or (w.enabled and soc_set != w.target_soc | int) %}
                   {% if (trigger.id == 'apply' and -1 <= mins <= 20) or (running and changed) %}
-                    {% set ns.keys = ns.keys + [key] %}
+                    {% if use_single_slot and charge %}
+                      {# One slot: only the earliest charge window goes in. #}
+                      {% if ns.first is none or as_timestamp(w.start) < ns.first_t %}
+                        {% set ns.first = key %}{% set ns.first_t = as_timestamp(w.start) %}
+                      {% endif %}
+                    {% else %}
+                      {% set ns.keys = ns.keys + [key] %}
+                    {% endif %}
                   {% endif %}
                 {% endfor %}
-                {{ ns.keys }}
+                {{ ns.keys + ([ns.first] if ns.first else []) }}
           - repeat:
               for_each: "{{ due }}"
               sequence:
                 - variables:
                     key: "{{ repeat.item }}"
                     kind: "{{ key.split('_')[0] }}"
-                    slot: "{{ key.split('_')[1] | int }}"
+                    slot: "{{ 1 if (use_single_slot and kind == 'charge') else key.split('_')[1] | int }}"
                     w: "{{ state_attr(plan_entity, 'slots')[key] }}"
                     # Solis entity names: slot 1 has no suffix, others end _2, _3 ...
                     prefix: "number.solis8_timed_{{ kind }}"
@@ -106,7 +126,10 @@ actions:
                       {% set e = as_timestamp(w.end) | timestamp_custom('%H:%M', inverter_uses_local_time) %}
                       {{ '23:59' if e == '00:00' else e }}
                     mask: "{{ states(mask_entity) | int(0) }}"
-                    new_mask: "{{ (mask | bitwise_or(bit)) if w.enabled else (mask | bitwise_and(4095 - bit)) }}"
+                    # Charge slots 2-6 (bits 1-5) are cleared only with clear_unused_slots.
+                    new_mask: >-
+                      {% set m = (mask | bitwise_or(bit)) if w.enabled else (mask | bitwise_and(4095 - bit)) %}
+                      {{ m | bitwise_and(4095 - 62) if (use_single_slot and clear_unused_slots) else m }}
                 - action: number.set_value
                   target: { entity_id: "{{ prefix }}_start_hours{{ sfx }}" }
                   data: { value: "{{ start_h }}" }
@@ -133,7 +156,7 @@ actions:
                   data:
                     level: info
                     message: >-
-                      Battery plan {{ key }}: {{ 'ON' if w.enabled else 'off' }}
+                      Battery plan {{ key }} -> {{ kind }} slot {{ slot }} ({{ trigger.id }}): {{ 'ON' if w.enabled else 'off' }}
                       {{ '%02d:%02d' % (start_h, start_m) }}-{{ end_hm }}
                       {% if w.enabled %}to {{ w.target_soc }}%{% endif %} - {{ w.reason }}.
                       Bitmask {{ mask }} -> {{ new_mask }}.
@@ -153,16 +176,38 @@ actions:
         sequence:
           - variables:
               kind: "{{ trigger.id.split('_')[1] }}"
-              slot: "{{ trigger.id.split('_')[2] | int }}"
+              window: "{{ trigger.id.split('_')[2] | int }}"
+              charge: "{{ kind == 'charge' }}"
+              slot: "{{ 1 if (use_single_slot and charge) else window }}"
               sfx: "{{ '' if slot == 1 else '_' ~ slot }}"
               bit: "{{ 2 ** ((slot - 1) + (6 if kind == 'discharge' else 0)) }}"
               mask: "{{ states(mask_entity) | int(0) }}"
-              charge: "{{ kind == 'charge' }}"
-              new_mask: "{{ (mask | bitwise_or(bit)) if charge else (mask | bitwise_and(4095 - bit)) }}"
+              new_mask: >-
+                {% set m = (mask | bitwise_or(bit)) if charge else (mask | bitwise_and(4095 - bit)) %}
+                {{ m | bitwise_and(4095 - 62) if (use_single_slot and clear_unused_slots) else m }}
+              # Cosy times for each fallback window (start h, end h, end m).
+              times: "{{ {1: [4, 7, 0], 2: [13, 16, 0], 3: [22, 23, 59]}[window] }}"
           - if:
               - condition: template
                 value_template: "{{ charge }}"
             then:
+              - if:
+                  - condition: template
+                    value_template: "{{ use_single_slot }}"
+                then:
+                  # One slot serves every window: put this window's times in it.
+                  - action: number.set_value
+                    target: { entity_id: "number.solis8_timed_charge_start_hours" }
+                    data: { value: "{{ times[0] }}" }
+                  - action: number.set_value
+                    target: { entity_id: "number.solis8_timed_charge_start_minutes" }
+                    data: { value: 0 }
+                  - action: number.set_value
+                    target: { entity_id: "number.solis8_timed_charge_end_hours" }
+                    data: { value: "{{ times[1] }}" }
+                  - action: number.set_value
+                    target: { entity_id: "number.solis8_timed_charge_end_minutes" }
+                    data: { value: "{{ times[2] }}" }
               - action: number.set_value
                 target: { entity_id: "number.solis8_timed_charge_soc{{ sfx }}" }
                 data: { value: 80 }
@@ -185,7 +230,7 @@ actions:
           - condition: template
             value_template: >-
               {% set w = (state_attr(plan_entity, 'slots') or {}).get('discharge_1') %}
-              {{ w is mapping and as_datetime(w.start) <= now() < as_datetime(w.end) }}
+              {{ w is mapping and w.enabled and as_datetime(w.start) <= now() < as_datetime(w.end) }}
           - condition: template
             value_template: "{{ states(mask_entity) | int(0) | bitwise_and(64) > 0 }}"
           - condition: template
@@ -233,3 +278,5 @@ actions:
                 data: { option: "{{ new_mode }}" }
 mode: queued
 max: 10
+trace:
+  stored_traces: 30
