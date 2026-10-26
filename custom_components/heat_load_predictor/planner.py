@@ -298,7 +298,13 @@ def make_plan(
         soc = [soc_now]
         s = soc_now
         for i in range(upto):
-            feed_in = not self_use_safe(i, s)
+            # In a charge window always Self-Use: spare solar charges the
+            # battery and the grid only tops up. Feed-in priority there would
+            # export the solar while the timed charge buys from the grid.
+            charging = actions[i] is not None and actions[i][0] == "charge"
+            # Feed-in priority only matters with spare solar; otherwise Self-Use.
+            feed_in = (not charging and pv_kwh[i] > load_kwh[i]
+                       and not self_use_safe(i, s))
             modes[i] = "Feed-in priority" if feed_in else "Self-Use"
             s = _step(s, actions[i], pv_kwh[i], load_kwh[i], dt_h, params, feed_in)
             soc.append(s)
@@ -406,6 +412,11 @@ def make_plan(
             if just_enough is not None and just_enough > fill_to:
                 target, enabled, reason = _spill_day_charge(
                     pv_cautious, load_cautious, a, b, gap_end, projected, dt_h, params, fill_to)
+            elif fill_to > projected + 0.5 and _grid_into(
+                    projected, fill_to, a, b, pv_kwh, load_kwh, dt_h, params) < 0.1:
+                # The solar reaches the target on its own: no grid power needed.
+                target, enabled = fill_to, False
+                reason = f"the solar will fill the battery to {fill_to}% on its own"
             elif fill_to > projected + 0.5:
                 target, enabled = fill_to, True
                 reason = f"fill to {target}% on cheap power"
@@ -538,6 +549,17 @@ def _lowest_target(lowest, projected: float, p: BatteryParams) -> int | None:
         else:
             lo = mid + 1
     return hi
+
+
+def _grid_into(soc: float, target: float, a: int, b: int, pv, load, dt_h: float,
+               p: BatteryParams) -> float:
+    """Grid kWh a charge to `target` over periods [a, b) would buy, solar first."""
+    grid = 0.0
+    for i in range(a, min(b, len(pv))):
+        solar, g = _charge_split(soc, target, pv[i], load[i], dt_h, p)
+        grid += g
+        soc = min(100.0, soc + (solar + g) / p.capacity_kwh * 100)
+    return grid
 
 
 def _charge_split(soc: float, target: float, pv: float, load: float, dt_h: float,

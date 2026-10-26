@@ -243,7 +243,9 @@ def test_big_day_flips_to_self_use_as_early_as_possible_without_clipping():
     params = pl.BatteryParams(discharge_threshold_soc=0,        # isolate day 1: no discharge
                               fill_cheap_windows=False)
     plan, starts, load, pv = plan_for(start, heat_kw=0.0, pv_peak=9.0, soc=40, params=params)
-    today = [(t.astimezone(LON), m) for t, m in plan.modes if t.astimezone(LON).date() == start.date()]
+    # Only periods with spare solar: elsewhere the mode makes no difference.
+    today = [(t.astimezone(LON), m) for i, (t, m) in enumerate(plan.modes)
+             if t.astimezone(LON).date() == start.date() and pv[i] > load[i]]
     flips = [t for (t0, m0), (t, m) in zip(today, today[1:]) if m0 != m]
     assert len(flips) == 1 and dict(today)[flips[0]] == "Self-Use", flips
     assert 8 <= flips[0].hour <= 14
@@ -541,3 +543,20 @@ def test_real_plan_with_learned_baseload():
     sat = find(plan, "charge", datetime(2026, 10, 24, 22, tzinfo=LON))
     assert not sat.enabled, sat.reason
     assert min(v for _, v in plan.soc) > d["params"]["min_soc"] + 1
+
+
+def test_real_no_grid_charge_while_exporting():
+    """Regression (26 Oct, real data): Tuesday's plan had Feed-in priority
+    until 15:30 *and* a 13:00 charge window to 100%, so the inverter would
+    export solar while buying from the grid. The solar fills the battery on
+    its own: the window is off, charge windows are always Self-Use, and the
+    mode is only Feed-in priority when there's spare solar."""
+    d, starts, plan = _replay("plan_2026-10-26_feedin.json")
+    aft = find(plan, "charge", datetime(2026, 10, 27, 13, tzinfo=timezone.utc))
+    assert not aft.enabled and "on its own" in aft.reason, aft.reason
+    for i, (t, m) in enumerate(plan.modes):
+        if m != "Self-Use":
+            assert d["pv_kwh"][i] > d["load_kwh"][i], (t, m)                 # no feed-in at night
+        for w in plan.windows:
+            if w.kind == "charge" and w.enabled and w.start <= t < w.end:
+                assert m == "Self-Use", (t, m)
