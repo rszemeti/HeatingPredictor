@@ -208,10 +208,15 @@ class WindowPlan:
 class Plan:
     windows: list[WindowPlan] = field(default_factory=list)
     soc: list[tuple[datetime, float]] = field(default_factory=list)  # at each period end
-    # Recommended storage mode for each period: "Self-Use" from the earliest
-    # point at which the battery can take all spare solar without clipping,
-    # "Feed-in priority" (export first) before that.
+    # Recommended storage mode for each period: "Self-Use" (store all spare
+    # solar) unless that would leave too little room for the solar above the
+    # export limit still to come, then "Feed-in priority" (export first, store
+    # only the excess). Stores as much as it can, as early as it can, without
+    # clipping.
     modes: list[tuple[datetime, str]] = field(default_factory=list)
+    # Solar expected to be lost (kWh) in each period: above the export limit
+    # with the battery full. Non-zero only when clipping can't be avoided.
+    clipped: list[tuple[datetime, float]] = field(default_factory=list)
 
 
 def make_plan(
@@ -221,6 +226,7 @@ def make_plan(
     load_kwh: Sequence[float],
     pv_kwh: Sequence[float],
     pv_low_kwh: Sequence[float] | None = None,
+    pv_high_kwh: Sequence[float] | None = None,
     soc_now: float,
     params: BatteryParams,
     charge_windows: Sequence[tuple[time, time]],
@@ -239,6 +245,11 @@ def make_plan(
     by `params.load_margin_pct`. The projected SOC and the solar room use the
     expected figures, so the projection shows the likely path and the gap
     above the reserve is the safety buffer.
+
+    The storage mode guards against the opposite mistake, solar beating the
+    forecast and being clipped, so the room it keeps free is sized on
+    `pv_high_kwh` (an optimistic forecast) if given. Without it, the expected
+    forecast plus `params.solar_headroom_kwh` is used.
     """
     n = len(starts)
     if n == 0:
@@ -285,13 +296,21 @@ def make_plan(
     for i in range(n - 2, -1, -1):
         day_end[i] = day_end[i + 1] if local_starts[i + 1].date() == local_starts[i].date() else i + 1
 
-    def self_use_safe(i: int, soc: float) -> bool:
-        """Can the battery take all spare solar from period i without clipping?"""
-        return _self_use_clipping(
-            pv_kwh, load_kwh, i, day_end[i], soc, dt_h, params
-        ) < CLIP_TOLERANCE_KWH
+    # Storage mode, worked backwards then forwards. Backwards: the free space
+    # (kWh) the battery must have after period i so that no solar above the
+    # export limit is lost for the rest of that day, sized on the optimistic
+    # forecast (clipping comes from solar beating the forecast). Forwards (in
+    # simulate): store everything (Self-Use) unless that would leave less than
+    # this, then store only the excess over the export limit (Feed-in priority).
+    pv_room = list(pv_high_kwh) if pv_high_kwh is not None else list(pv_kwh)
+    margin = 0.0 if pv_high_kwh is not None else params.solar_headroom_kwh
+    room_after = [0.0] * n
+    for i in range(n):
+        r = _room_at(pv_room, load_kwh, i + 1, day_end[i], dt_h, params)
+        room_after[i] = r + margin if r > 0 else 0.0
 
     modes: list[str] = ["Self-Use"] * n
+    clipped: list[float] = [0.0] * n
 
     def simulate(upto: int) -> list[float]:
         """SOC at the start of each period 0..upto (inclusive)."""
@@ -302,11 +321,18 @@ def make_plan(
             # battery and the grid only tops up. Feed-in priority there would
             # export the solar while the timed charge buys from the grid.
             charging = actions[i] is not None and actions[i][0] == "charge"
+            spare = pv_kwh[i] - load_kwh[i]
+            free_if_stored = cap - min(cap, s / 100 * cap + max(0.0, spare))
             # Feed-in priority only matters with spare solar; otherwise Self-Use.
-            feed_in = (not charging and pv_kwh[i] > load_kwh[i]
-                       and not self_use_safe(i, s))
+            feed_in = (not charging and spare > 0
+                       and free_if_stored < room_after[i] - CLIP_TOLERANCE_KWH)
             modes[i] = "Feed-in priority" if feed_in else "Self-Use"
-            s = _step(s, actions[i], pv_kwh[i], load_kwh[i], dt_h, params, feed_in)
+            nxt = _step(s, actions[i], pv_kwh[i], load_kwh[i], dt_h, params, feed_in)
+            # Spare solar that neither went into the battery nor fits the export.
+            stored = max(0.0, nxt - s) / 100 * cap
+            clipped[i] = max(0.0, spare - stored - params.export_limit_kw * dt_h) \
+                if spare > 0 and (actions[i] is None or actions[i][0] != "discharge") else 0.0
+            s = nxt
             soc.append(s)
         return soc
 
@@ -481,6 +507,7 @@ def make_plan(
         windows=plans,
         soc=[(starts[i] + dt, soc[i + 1]) for i in range(n)],
         modes=list(zip(starts, modes)),
+        clipped=list(zip(starts, clipped)),
     )
 
 

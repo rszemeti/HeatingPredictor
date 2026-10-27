@@ -1,7 +1,7 @@
 """Constants for Heat Load Predictor."""
 
 DOMAIN = "heat_load_predictor"
-VERSION = "0.3.14"
+VERSION = "0.3.15"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR = "indoor_temp_entity"
@@ -66,6 +66,8 @@ SOLAR_CONFIDENCE_FIELD = {
     "optimistic": "pv_estimate90",
 }
 BATTERY_DEFAULTS[CONF_SOLAR_CONFIDENCE] = "pessimistic"
+# Sizes the room the storage mode keeps free for solar above the export limit.
+SOLAR_HIGH_FIELD = "pv_estimate90"
 BATTERY_DEFAULTS[CONF_LOAD_MARGIN] = 10
 CONF_CHARGE_STRATEGY = "charge_strategy"   # "fill" or "minimum"
 BATTERY_DEFAULTS[CONF_CHARGE_STRATEGY] = "fill"

@@ -13,8 +13,9 @@ description: >
      once SOC reaches the target, switch discharge slot 1 off so the inverter
      doesn't import from the grid to hold that level.
   3. Storage mode - every 30 minutes set the mode the plan recommends:
-     Self-Use from the earliest point at which the battery can take all spare
-     solar without clipping later, Feed-in priority (export first) before that.
+     Self-Use (store all spare solar) unless that would leave too little room
+     for the solar above the export limit still to come, Feed-in priority
+     (export first, store only the excess) then.
   Adjust the entity names in the variables to suit your installation.
 triggers:
   - trigger: time
@@ -259,8 +260,9 @@ actions:
             id: storage_mode
         sequence:
           - variables:
-              # The plan picks Self-Use from the earliest point at which the
-              # battery can take all spare solar without clipping later.
+              # The plan stores as much as it can, as early as it can, without
+              # clipping: Self-Use until the room left is what the solar above
+              # the export limit still needs, Feed-in priority while it is.
               # If the plan is unavailable, fall back to a simple comparison.
               planned: "{{ state_attr(plan_entity, 'storage_mode') }}"
               space_kwh: "{{ (100 - states(soc_entity) | float(50)) / 100 * battery_kwh }}"

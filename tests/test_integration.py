@@ -424,11 +424,38 @@ async def test_plan_data_download_replays_to_the_same_plan(hass: HomeAssistant, 
         if d["charge_ranges"] is not None else None
     plan = pl.make_plan(
         starts=starts, period_minutes=d["period_minutes"], load_kwh=d["load_kwh"],
-        pv_kwh=d["pv_kwh"], pv_low_kwh=d["pv_low_kwh"], soc_now=d["soc_now"],
-        params=pl.BatteryParams(**d["params"]),
+        pv_kwh=d["pv_kwh"], pv_low_kwh=d["pv_low_kwh"], pv_high_kwh=d["pv_high_kwh"],
+        soc_now=d["soc_now"], params=pl.BatteryParams(**d["params"]),
         charge_windows=pl.parse_windows(d["cheap_windows"]),
         discharge_windows=pl.parse_windows(d["discharge_windows"]), charge_ranges=ranges,
     )
     got = [(w.start.isoformat(), w.enabled, w.target_soc) for w in plan.windows]
     want = [(w["start"], w["enabled"], w["target_soc"]) for w in d["plan"]["windows"]]
     assert got == want
+    assert [m for _, m in plan.modes] == [m for _, m in d["plan"]["modes"]]
+
+
+async def test_storage_mode_room_uses_optimistic_solar(hass: HomeAssistant, fake_weather, hass_ws_client) -> None:
+    """With Solcast's pv_estimate90 present, the room kept for solar above the
+    export limit is sized on it, and the plan reports any clipping it expects."""
+    import math as _m
+
+    hass.states.async_set("sensor.battery_soc", "40", {"unit_of_measurement": "%"})
+    today = dt_util.start_of_local_day()
+    for name, day in (("sensor.solcast_today", today), ("sensor.solcast_tomorrow", today + timedelta(days=1))):
+        slots = []
+        for i in range(48):
+            t = day + timedelta(minutes=30 * i)
+            h = t.hour + t.minute / 60
+            kw = 9.0 * _m.sin(_m.pi * (h - 8) / 8) if 8 <= h <= 16 else 0.0
+            slots.append({"period_start": t, "pv_estimate": round(kw, 3),
+                          "pv_estimate10": round(kw * 0.5, 3), "pv_estimate90": round(kw * 1.2, 3)})
+        hass.states.async_set(name, "1", {"detailedForecast": slots})
+    await _setup(hass, {**OPTIONS, **BATTERY})
+    a = hass.states.get("sensor.heat_pump_battery_plan").attributes
+    assert a["clipping_today_kwh"] >= 0 and a["clipping_24h_kwh"] >= 0
+    client = await hass_ws_client(hass)
+    await client.send_json({"id": 1, "type": f"{DOMAIN}/plan_data"})
+    d = (await client.receive_json())["result"]
+    assert d["pv_high_kwh"] is not None
+    assert max(d["pv_high_kwh"]) == pytest.approx(max(d["pv_kwh"]) * 1.2, rel=0.02)

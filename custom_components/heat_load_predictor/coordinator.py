@@ -60,6 +60,7 @@ from .const import (
     DOMAIN,
     LEARN_EVERY_HOURS,
     SOLAR_CONFIDENCE_FIELD,
+    SOLAR_HIGH_FIELD,
     WRITE_LEAD_MINUTES,
     STORAGE_VERSION,
     VERSION,
@@ -293,8 +294,13 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         `field` picks the estimate; if a slot lacks it, the median is used.
         """
+        slots, found, _ = self._solar_slots_with(field)
+        return slots, found
+
+    def _solar_slots_with(self, field: str) -> tuple[list[tuple[datetime, float]], bool, bool]:
+        """As `_solar_slots`, plus whether any slot actually had `field`."""
         slots: list[tuple[datetime, float]] = []
-        found = False
+        found = has_field = False
         for key in (CONF_SOLAR_TODAY, CONF_SOLAR_TOMORROW):
             entity_id = self.config_entry.options.get(key)
             state = self.hass.states.get(entity_id) if entity_id else None
@@ -310,7 +316,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
                 slots.append((dt_util.as_utc(when), kw))
                 found = True
-        return slots, found
+                has_field = has_field or field in item
+        return slots, found, has_field
 
     async def _async_maybe_learn(self) -> None:
         """Relearn the baseload profile if it's missing or stale."""
@@ -500,6 +507,10 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         field = SOLAR_CONFIDENCE_FIELD.get(o[CONF_SOLAR_CONFIDENCE], "pv_estimate")
         low_slots, _ = self._solar_slots(field)
         pv_low = solar_per_period(utc_starts, self.period, low_slots)
+        # Clipping comes from solar beating the forecast, so the room the
+        # storage mode keeps free is sized on the optimistic estimate.
+        high_slots, _, has_high = self._solar_slots_with(SOLAR_HIGH_FIELD)
+        pv_high = solar_per_period(utc_starts, self.period, high_slots) if has_high else None
         charge_ranges, charge_source = self._charge_ranges(
             o, starts[0], dt_util.as_local(utc_starts[-1] + timedelta(minutes=self.period))
         )
@@ -521,6 +532,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             load_kwh=load,
             pv_kwh=pv,
             pv_low_kwh=pv_low,
+            pv_high_kwh=pv_high,
             soc_now=soc_now,
             params=params,
             charge_windows=parse_windows(o[CONF_CHEAP_WINDOWS]),
@@ -540,6 +552,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "pv_kwh": [round(x, 4) for x in pv],
             "pv_low_kwh": [round(x, 4) for x in pv_low],
             "solar_field_low": field,
+            "pv_high_kwh": [round(x, 4) for x in pv_high] if pv_high is not None else None,
             "solar_slots": [(t.isoformat(), kw) for t, kw in slots],
             "soc_now": soc_now,
             "params": asdict(params),
@@ -553,6 +566,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "windows": [w.as_dict() for w in plan.windows],
                 "soc": [(t.isoformat(), round(v, 2)) for t, v in plan.soc],
                 "modes": [(t.isoformat(), m) for t, m in plan.modes],
+                "clipped": [(t.isoformat(), round(c, 3)) for t, c in plan.clipped],
             },
         }
         # The plan is in UTC; from here on, times are for people: local.
@@ -579,6 +593,10 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         next_write = writes[0][0] if writes else None
         next_write_slots = [k for t, k in writes if t == next_write]
         socs = [v for _, v in plan.soc]
+        # Solar expected to be lost above the export limit with the battery
+        # full, today and over the next 24 h: zero unless it can't be avoided.
+        clip_today = sum(c for t, c in plan.clipped if dt_util.as_local(t).date() == now_local.date())
+        clip_24h = sum(c for _, c in plan.clipped[: int(24 / dt_h)])
         modes = [(dt_util.as_local(t), m) for t, m in plan.modes]
         storage_mode = modes[0][1] if modes else "Self-Use"
         today = now_local.date()
@@ -596,6 +614,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "next_write": next_write.isoformat() if next_write else None,
             "next_write_slots": next_write_slots,
             "self_use_from": self_use_from,
+            "clipping_today_kwh": round(clip_today, 2),
+            "clipping_24h_kwh": round(clip_24h, 2),
             "soc_now": soc_now,
             "solar_forecast": solar_ok,
             "windows": windows,

@@ -238,34 +238,88 @@ def test_self_use_all_day_when_solar_never_exceeds_export_limit():
     assert {m for t, m in plan.modes if t.date() == start.date()} == {"Self-Use"}
 
 
-def test_big_day_flips_to_self_use_as_early_as_possible_without_clipping():
+def _feed_in_first_modes(starts, load, pv, soc0, p):
+    """The old rule: Feed-in priority until Self-Use from here can't clip."""
+    modes, s = [], soc0
+    for i, t in enumerate(starts):
+        end = next((j for j in range(i, len(starts)) if starts[j].date() != t.date()), len(starts))
+        safe = pl._self_use_clipping(pv, load, i, end, s, 0.5, p) < pl.CLIP_TOLERANCE_KWH
+        feed_in = pv[i] > load[i] and not safe
+        modes.append((t, "Feed-in priority" if feed_in else "Self-Use"))
+        s = pl._step(s, None, pv[i], load[i], 0.5, p, feed_in)
+    return pl.Plan(modes=modes)
+
+
+def test_big_day_stores_first_and_feeds_in_only_through_the_peak():
+    """Store as much as possible, as early as possible, without clipping: Self-Use
+    until the room left is just what the solar above the export limit still
+    needs, Feed-in priority through the peak, then Self-Use again."""
     start = datetime(2026, 6, 15, 0, tzinfo=LON)
     params = pl.BatteryParams(discharge_threshold_soc=0,        # isolate day 1: no discharge
                               fill_cheap_windows=False)
     plan, starts, load, pv = plan_for(start, heat_kw=0.0, pv_peak=9.0, soc=40, params=params)
     # Only periods with spare solar: elsewhere the mode makes no difference.
-    today = [(t.astimezone(LON), m) for i, (t, m) in enumerate(plan.modes)
+    today = [m for i, (t, m) in enumerate(plan.modes)
              if t.astimezone(LON).date() == start.date() and pv[i] > load[i]]
-    flips = [t for (t0, m0), (t, m) in zip(today, today[1:]) if m0 != m]
-    assert len(flips) == 1 and dict(today)[flips[0]] == "Self-Use", flips
-    assert 8 <= flips[0].hour <= 14
+    runs = [m for k, m in enumerate(today) if k == 0 or today[k - 1] != m]
+    assert runs == ["Self-Use", "Feed-in priority", "Self-Use"], runs
     lost, path = _replay_lost(plan, starts, load, pv, 40, params)
     assert lost < 0.2, lost                      # no clipping
-    # Flipping any earlier would clip.
-    early = pl.Plan(windows=plan.windows, soc=plan.soc,
-                    modes=[(t, "Self-Use" if t >= flips[0] - timedelta(hours=1) else m) for t, m in plan.modes])
-    lost_early, _ = _replay_lost(early, starts, load, pv, 40, params)
-    assert lost_early > lost + 0.2
-    # And it stores more than the old "fill just in time" rule would have.
-    old_modes = []
-    s = 40.0
-    for i, t in enumerate(starts):
-        left = sum(pv[j] for j in range(i, len(starts)) if starts[j].date() == t.date())
-        old_modes.append((t, "Feed-in priority" if left > (100 - s) / 100 * 32 else "Self-Use"))
-        s = pl._step(s, None, pv[i], load[i], 0.5, params, old_modes[-1][1] != "Self-Use")
-    _, old_path = _replay_lost(pl.Plan(modes=old_modes), starts, load, pv, 40, params)
-    i17 = starts.index(datetime(2026, 6, 15, 17, tzinfo=LON))
-    assert path[i17] >= old_path[i17] - 0.5
+    assert sum(c for t, c in plan.clipped if t.astimezone(LON).date() == start.date()) < 0.2
+    # Ahead of the old feed-in-first rule all morning; behind it only near the
+    # end of the peak, by at most the headroom plus one half-hour's export; full
+    # by the same time.
+    old = _feed_in_first_modes(starts, load, pv, 40.0, params)
+    old_lost, old_path = _replay_lost(old, starts, load, pv, 40, params)
+    assert old_lost < 0.2
+    margin = (params.solar_headroom_kwh + params.export_limit_kw * 0.5) / params.capacity_kwh * 100
+    assert all(a >= b - margin for a, b in zip(path, old_path))
+    noon = starts.index(datetime(2026, 6, 15, 12, tzinfo=LON))
+    assert all(a >= b - 0.5 for a, b in zip(path[:noon], old_path[:noon]))
+    assert path[noon] > old_path[noon] + 5
+    full = starts.index(datetime(2026, 6, 15, 14, 30, tzinfo=LON))
+    assert path[full] >= 99.5 and old_path[full] >= 99.5
+
+
+def test_storing_more_before_the_peak_would_clip():
+    """With the room sized on a forecast taken as exact (no headroom), the first
+    Feed-in period is as late as it can be: Self-Use there clips."""
+    start = datetime(2026, 6, 15, 0, tzinfo=LON)
+    params = pl.BatteryParams(discharge_threshold_soc=0, fill_cheap_windows=False)
+    _, starts, load, pv = plan_for(start, heat_kw=0.0, pv_peak=9.0, soc=40, params=params)
+    plan = pl.make_plan(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, pv_high_kwh=pv,
+                        soc_now=40, params=params, charge_windows=[], discharge_windows=[])
+    first = next(t for t, m in plan.modes if m == "Feed-in priority")
+    lost, _ = _replay_lost(plan, starts, load, pv, 40, params)
+    assert lost < 0.2, lost
+    greedier = pl.Plan(modes=[(t, "Self-Use" if t == first else m) for t, m in plan.modes])
+    lost_greedier, _ = _replay_lost(greedier, starts, load, pv, 40, params)
+    assert lost_greedier > lost + 0.05, (lost, lost_greedier)
+
+
+def test_optimistic_forecast_keeps_more_room():
+    """Clipping comes from solar beating the forecast: sized on a higher
+    forecast, the plan switches to Feed-in priority sooner."""
+    start = datetime(2026, 6, 15, 0, tzinfo=LON)
+    params = pl.BatteryParams(discharge_threshold_soc=0, fill_cheap_windows=False)
+    _, starts, load, pv = plan_for(start, heat_kw=0.0, pv_peak=9.0, soc=40, params=params)
+    kw = dict(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=40,
+              params=params, charge_windows=[], discharge_windows=[])
+    exact = pl.make_plan(**kw, pv_high_kwh=pv)
+    high = pl.make_plan(**kw, pv_high_kwh=[x * 1.2 for x in pv])
+    first = lambda p: next(t for t, m in p.modes if m == "Feed-in priority")  # noqa: E731
+    assert first(high) < first(exact)
+
+
+def test_unavoidable_clipping_is_reported():
+    """A peak bigger than an empty battery can absorb: the plan says how much
+    will be lost rather than pretending."""
+    start = datetime(2026, 6, 15, 0, tzinfo=LON)
+    params = pl.BatteryParams(capacity_kwh=5, discharge_threshold_soc=0, fill_cheap_windows=False)
+    plan, starts, load, pv = plan_for(start, heat_kw=0.0, pv_peak=9.0, soc=40, params=params)
+    clipped = sum(c for t, c in plan.clipped if t.astimezone(LON).date() == start.date())
+    lost, _ = _replay_lost(plan, starts, load, pv, 40, params)
+    assert clipped > 1 and clipped == pytest.approx(lost, rel=0.05)
 
 
 def _cosy_rates(day, cheap=((4, 7), (13, 16), (22, 24)), peak=(16, 19)):
@@ -470,7 +524,8 @@ def _replay(name):
         if d.get("charge_ranges") else None
     return d, starts, pl.make_plan(
         starts=starts, period_minutes=d["period_minutes"], load_kwh=d["load_kwh"], pv_kwh=d["pv_kwh"],
-        pv_low_kwh=d["pv_low_kwh"], soc_now=d["soc_now"], params=pl.BatteryParams(**d["params"]),
+        pv_low_kwh=d["pv_low_kwh"], pv_high_kwh=d.get("pv_high_kwh"), soc_now=d["soc_now"],
+        params=pl.BatteryParams(**d["params"]),
         charge_windows=pl.parse_windows(d["cheap_windows"]),
         discharge_windows=pl.parse_windows(d["discharge_windows"]), charge_ranges=ranges)
 
@@ -560,3 +615,33 @@ def test_real_no_grid_charge_while_exporting():
         for w in plan.windows:
             if w.kind == "charge" and w.enabled and w.start <= t < w.end:
                 assert m == "Self-Use", (t, m)
+
+
+def test_real_44kwh_day_stores_before_feeding_in():
+    """Regression (27 Oct, real data): 44% at 10:30, ~44 kWh of solar to come,
+    ~18 kWh of room. The old rule chose Feed-in priority from 10:30 because the
+    surplus wouldn't fit, exporting solar the battery had room for. Only the
+    surplus above the 5 kW export limit (~11 kWh) needs room, so the plan now
+    stores first, feeds in through the peak, and still clips nothing."""
+    d, starts, plan = _replay("plan_2026-10-27_morning.json")
+    p = pl.BatteryParams(**d["params"])
+    modes = [m for _, m in plan.modes]
+    assert modes[0] == "Self-Use"                                       # 10:30: store
+    assert "Feed-in priority" in modes[:12]                             # through the peak
+    lost, path = _replay_lost(plan, starts, d["load_kwh"], d["pv_kwh"], d["soc_now"], p, periods=13)
+    assert lost < 0.2, lost
+    assert sum(c for _, c in plan.clipped[:13]) < 0.2
+    # Ahead of the old plan until the peak (by about 12% at 12:00, 3.8 kWh),
+    # behind at most by the headroom kept for its end, and full by 15:30 as before.
+    old_soc = [v for _, v in d["plan"]["soc"]]
+    new_soc = [v for _, v in plan.soc]
+    hhmm = [t.astimezone(LON).strftime("%H:%M") for t in starts]
+    noon, full = hhmm.index("12:00"), hhmm.index("15:30")
+    assert all(a >= b - 0.5 for a, b in zip(new_soc[:hhmm.index("14:00")], old_soc))
+    assert new_soc[noon] > old_soc[noon] + 10
+    margin = p.solar_headroom_kwh / p.capacity_kwh * 100 + 0.5
+    assert all(a >= b - margin for a, b in zip(new_soc[:full], old_soc[:full]))
+    assert new_soc[full] >= 99.5
+    # The 13:00 window still isn't needed: the solar fills the battery.
+    aft = find(plan, "charge", datetime(2026, 10, 27, 13, tzinfo=timezone.utc))
+    assert not aft.enabled, aft.reason

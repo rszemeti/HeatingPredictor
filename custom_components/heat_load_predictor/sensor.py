@@ -171,7 +171,8 @@ class BatteryPlanSensor(_BatteryBase):
         if not plan:
             return None
         return {k: plan[k] for k in (
-            "soc_now", "solar_forecast", "storage_mode", "self_use_from", "charge_windows_from", "baseload_from", "baseload_profile",
+            "soc_now", "solar_forecast", "storage_mode", "self_use_from", "clipping_today_kwh", "clipping_24h_kwh",
+            "charge_windows_from", "baseload_from", "baseload_profile",
             "next", "slots", "windows", "soc_forecast")}
 
 
