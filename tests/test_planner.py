@@ -519,7 +519,9 @@ def test_room_at_credits_overnight_use():
     assert pl._room_at(pv, load, 0, 16, 0.5, p) == pytest.approx(12.0 - 4.0, abs=0.15)   # within the clipping tolerance
 
 
-def _replay(name):
+def _replay(name, optimistic=False):
+    """Rerun a downloaded plan. Like the integration's default, the room for
+    the solar peak uses the expected forecast unless `optimistic`."""
     import json
 
     d = json.loads((pathlib.Path(__file__).parent / "data" / name).read_text())
@@ -528,7 +530,7 @@ def _replay(name):
         if d.get("charge_ranges") else None
     return d, starts, pl.make_plan(
         starts=starts, period_minutes=d["period_minutes"], load_kwh=d["load_kwh"], pv_kwh=d["pv_kwh"],
-        pv_low_kwh=d["pv_low_kwh"], pv_high_kwh=d.get("pv_high_kwh"), soc_now=d["soc_now"],
+        pv_low_kwh=d["pv_low_kwh"], pv_high_kwh=d.get("pv_high_kwh") if optimistic else None, soc_now=d["soc_now"],
         params=pl.BatteryParams(**d["params"]),
         charge_windows=pl.parse_windows(d["cheap_windows"]),
         discharge_windows=pl.parse_windows(d["discharge_windows"]), charge_ranges=ranges)
