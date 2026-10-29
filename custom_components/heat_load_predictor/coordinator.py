@@ -61,6 +61,7 @@ from .const import (
     LEARN_EVERY_HOURS,
     SOLAR_CONFIDENCE_FIELD,
     SOLAR_HIGH_FIELD,
+    CONF_ROOM_FORECAST,
     WRITE_LEAD_MINUTES,
     STORAGE_VERSION,
     VERSION,
@@ -693,10 +694,14 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         field = SOLAR_CONFIDENCE_FIELD.get(o[CONF_SOLAR_CONFIDENCE], "pv_estimate")
         low_slots, _ = self._solar_slots(field)
         pv_low = solar_per_period(utc_starts, self.period, low_slots)
-        # Clipping comes from solar beating the forecast, so the room the
-        # storage mode keeps free is sized on the optimistic estimate.
-        high_slots, _, has_high = self._solar_slots_with(SOLAR_HIGH_FIELD)
-        pv_high = solar_per_period(utc_starts, self.period, high_slots) if has_high else None
+        # The room the storage mode keeps free for the peak: on the expected
+        # forecast plus headroom (default; the plan reruns every 15 minutes, so
+        # a sunnier day switches to Feed-in in time), or on Solcast's
+        # optimistic estimate, which exports more on an ordinary day.
+        pv_high = None
+        if o.get(CONF_ROOM_FORECAST, "expected") == "optimistic":
+            high_slots, _, has_high = self._solar_slots_with(SOLAR_HIGH_FIELD)
+            pv_high = solar_per_period(utc_starts, self.period, high_slots) if has_high else None
         charge_ranges, charge_source = self._charge_ranges(
             o, starts[0], dt_util.as_local(utc_starts[-1] + timedelta(minutes=self.period))
         )

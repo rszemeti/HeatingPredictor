@@ -665,3 +665,19 @@ def test_real_dont_buy_what_the_solar_will_supply():
     night = find(plan, "charge", utc(29, 22))
     assert night.target_soc < 100, night.reason
     assert min(v for _, v in plan.soc) > d["params"]["reserve_soc"]
+
+
+def test_real_self_use_morning_no_afternoon_buy():
+    """Regression (29 Oct 02:19, real data): room for the peak sized on the
+    optimistic forecast kept Feed-in priority on from 08:30, the battery sat at
+    72% all morning, and the 13:00 window bought it back from the grid. Sized
+    on the expected forecast: Self-Use through the morning, Feed-in priority
+    only around the peak, no grid charge at 13:00, nothing clipped."""
+    d, starts, plan = _replay("plan_2026-10-29_feedin_then_buy.json")      # no pv_high: expected
+    aft = find(plan, "charge", datetime(2026, 10, 29, 13, tzinfo=timezone.utc))
+    assert not aft.enabled, aft.reason
+    feed = [t.astimezone(LON) for t, m in plan.modes
+            if m != "Self-Use" and t.astimezone(LON).day == 29]
+    assert feed and min(feed).hour >= 10 and max(feed).hour <= 13, feed
+    soc = {t.astimezone(LON).strftime("%H:%M"): v for t, v in plan.soc if t.astimezone(LON).day == 29}
+    assert soc["11:30"] > soc["08:30"] + 5           # the morning solar is stored

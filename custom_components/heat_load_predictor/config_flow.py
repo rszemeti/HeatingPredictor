@@ -28,6 +28,7 @@ from .const import (
     CONF_CHEAP_TOLERANCE,
     CONF_HOUSE_LOAD,
     CONF_HP_SINCE,
+    CONF_ROOM_FORECAST,
     CONF_EMITTER_K,
     CONF_EMITTER_N,
     CONF_FLOW_LPM,
@@ -178,6 +179,13 @@ def _battery_schema(current: dict[str, Any]) -> vol.Schema:
         selector.SelectSelectorConfig(
             options=["pessimistic", "expected", "optimistic"],
             translation_key="solar_confidence",
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
+    fields[vol.Required(CONF_ROOM_FORECAST, default=d.get(CONF_ROOM_FORECAST, "expected"))] = selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=["expected", "optimistic"],
+            translation_key="room_forecast",
             mode=selector.SelectSelectorMode.DROPDOWN,
         )
     )

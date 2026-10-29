@@ -1,7 +1,7 @@
 """Constants for Heat Load Predictor."""
 
 DOMAIN = "heat_load_predictor"
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR = "indoor_temp_entity"
@@ -109,3 +109,8 @@ FLOW_DEFAULTS = {
 FLOW_ENTITY_KEYS = (CONF_HP_FLOW, CONF_HP_RETURN, CONF_HP_FLOW_RATE, CONF_HP_HEAT,
                     CONF_HP_POWER, CONF_HP_ROOM, CONF_HP_OUTDOOR)
 FLOW_KEYS = set(FLOW_DEFAULTS) | set(FLOW_ENTITY_KEYS)
+
+# What the room kept free for the solar peak is sized on: "expected" (median
+# forecast plus the solar headroom) or "optimistic" (Solcast pv_estimate90).
+CONF_ROOM_FORECAST = "room_forecast"
+BATTERY_DEFAULTS[CONF_ROOM_FORECAST] = "expected"

@@ -451,7 +451,7 @@ async def test_storage_mode_room_uses_optimistic_solar(hass: HomeAssistant, fake
             slots.append({"period_start": t, "pv_estimate": round(kw, 3),
                           "pv_estimate10": round(kw * 0.5, 3), "pv_estimate90": round(kw * 1.2, 3)})
         hass.states.async_set(name, "1", {"detailedForecast": slots})
-    await _setup(hass, {**OPTIONS, **BATTERY})
+    await _setup(hass, {**OPTIONS, **BATTERY, "room_forecast": "optimistic"})
     a = hass.states.get("sensor.heat_pump_battery_plan").attributes
     assert a["clipping_today_kwh"] >= 0 and a["clipping_24h_kwh"] >= 0
     client = await hass_ws_client(hass)
