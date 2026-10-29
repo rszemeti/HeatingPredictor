@@ -104,3 +104,63 @@ def test_balance_point():
     assert -12 < bp < 0
     # Lower heat loss holds to a colder day.
     assert fl.balance_point(180, 0.4, 21.5, K, N, LPM, 50) < bp
+
+
+def _fixed_flow_house(days=5, flow=32.0, a=0.1, b=0.08, c=0.04, seed=3):
+    """A house heated at a fixed flow, room following
+    d(room)/dt = a(flow-room) - b(room-out) + c  (per hour)."""
+    import math
+    rng = random.Random(seed)
+    t0 = datetime(2026, 10, 20, tzinfo=timezone.utc)
+    room, samples = 22.0, {}
+    for i in range(days * 48):
+        out = 9 + 4 * math.sin(i / 48 * 6.283) + rng.uniform(-0.3, 0.3)
+        f = flow if (i % 6) else flow - 6      # an off-cycle now and then
+        rooms = []
+        for _ in range(6):                     # 5-minute steps
+            room += (a * (f - room) - b * (room - out) + c) / 12
+            rooms.append(room)
+        mean_room = round(sum(rooms) / 6 + rng.uniform(-0.05, 0.05), 2)   # as the recorder keeps it
+        samples[t0 + timedelta(minutes=30 * i)] = fl.Sample(1.5, 0.45, f, f - 3, mean_room, out)
+    return samples
+
+
+def test_house_fit_from_a_fixed_flow():
+    """Fixed 32 °C flow holding ~22 °C: the learned law gives about 32 °C at
+    the conditions it ran in, and less for a lower target."""
+    s = _fixed_flow_house()
+    hf = fl.fit_house(s, s_fallback=1.2)
+    assert hf is not None
+    assert hf.mode == "fit" and hf.s == pytest.approx(0.08 / 0.1, rel=0.2), hf
+    pts = list(s.values())
+    room = sum(p.room for p in pts) / len(pts)
+    out = sum(p.out for p in pts) / len(pts)
+    mean_flow = sum(p.flow for p in pts) / len(pts)
+    assert hf.flow(room, out) == pytest.approx(mean_flow, abs=0.7)
+    assert hf.flow(room - 1, out) < mean_flow - 0.5
+    assert hf.holds_down_to(21, 55) < -20
+
+
+def test_house_fit_matches_the_physics_house():
+    s = _synthetic(days=5)
+    hf = fl.fit_house(s, s_fallback=1.0)
+    assert hf is not None and hf.s > 0
+    for out in (2, 6, 10):
+        need = 210 / 1000 * (21 - out) - 0.4
+        assert hf.flow(21, out) == pytest.approx(fl.flow_for(need, 21, K, N, LPM), abs=2.5)
+
+
+def test_house_fit_anchors_when_the_fit_is_nonsense():
+    s = _fixed_flow_house()
+    # Room readings frozen (a sensor stuck at one value): no slope to learn.
+    for t, smp in s.items():
+        s[t] = fl.Sample(smp.heat_kw, smp.elec_kw, 32.0, 29.0, 22.0, smp.out)
+    hf = fl.fit_house(s, s_fallback=1.2)
+    assert hf.mode == "anchored" and hf.s == 1.2
+    out = sum(p.out for p in s.values()) / len(s)
+    assert hf.flow(22.0, out) == pytest.approx(32.0, abs=0.3)
+
+
+def test_house_fit_needs_a_day():
+    s = dict(list(_fixed_flow_house(days=1).items())[:30])
+    assert fl.fit_house(s, s_fallback=1.0) is None

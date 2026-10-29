@@ -130,6 +130,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Flow planning: what's been learned from the heat pump, and when.
         self._flow_learned: flowlaw.Learned | None = None
         self._flow_learned_at: datetime | None = None
+        self._flow_house: flowlaw.HouseFit | None = None
+        self._flow_status = "not run yet"
         self._flow_correction = 0.0
         self._flow_corr_at: datetime | None = None
         self._warned_gas: set[str] = set()
@@ -338,11 +340,24 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if room is not None and self._flow_corr_at is not None:
             dt_h = min(1.0, (now_utc - self._flow_corr_at).total_seconds() / 3600)
             err = target(now_utc) - room
-            self._flow_correction = max(-3.0, min(3.0, self._flow_correction + 0.25 * err * dt_h))
+            self._flow_correction = max(-5.0, min(5.0, self._flow_correction + 0.5 * err * dt_h))
         self._flow_corr_at = now_utc
 
-        rows = [(r.heat_kw, (r.t_in_start + r.t_in_end) / 2) for r in results]
-        flows = flowlaw.plan_flows(rows, p, self._flow_correction)
+        house = self._flow_house
+        if house:
+            per_h = (results[1].start - results[0].start).total_seconds() / 3600 if len(results) > 1 else 0.5
+            flows = []
+            for r in results:
+                if r.heat_kw < p.idle_kw:
+                    flows.append(None)
+                    continue
+                room_mid = (r.t_in_start + r.t_in_end) / 2
+                f = house.flow(room_mid, r.t_out, (r.t_in_end - r.t_in_start) / per_h)
+                f = min(p.flow_max, max(p.flow_min, f + self._flow_correction))
+                flows.append(round(f * 2) / 2)
+        else:
+            rows = [(r.heat_kw, (r.t_in_start + r.t_in_end) / 2) for r in results]
+            flows = flowlaw.plan_flows(rows, p, self._flow_correction)
         cop_model = learned.cop
         plan = []
         for r, f, row in zip(results, flows, data["periods"]):
@@ -368,18 +383,33 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "flow_rate_from": lpm_source,
             "heat_loss_w_per_k": round(h),
             "heat_loss_from": "learned" if learned.heat_loss_w_per_k else "setting",
-            "water_law": [{"outdoor": t, "flow": f} for t, f in flowlaw.water_law(
-                h, gains, t_room, k, p.n, lpm)],
-            "holds_target_down_to": round(flowlaw.balance_point(
-                h, gains, t_room, k, p.n, lpm, p.flow_max), 1),
+            "curve_from": "history" if house else "settings",
+            "learn_status": self._flow_status,
+            "house_fit": house.as_dict() if house else None,
+            "water_law": (
+                [{"outdoor": t, "flow": round(house.flow(t_room, t), 1)} for t in (-10, -5, 0, 5, 10, 15)]
+                if house else
+                [{"outdoor": t, "flow": f} for t, f in flowlaw.water_law(h, gains, t_room, k, p.n, lpm)]),
+            "holds_target_down_to": round(
+                house.holds_down_to(t_room, p.flow_max) if house else
+                flowlaw.balance_point(h, gains, t_room, k, p.n, lpm, p.flow_max), 1),
             "learned": learned.as_dict(),
             "learned_at": self._flow_learned_at.isoformat() if self._flow_learned_at else None,
         }
 
     async def _async_maybe_learn_flow(self) -> None:
         o = self.config_entry.options
-        needed = (o.get(CONF_HP_FLOW), o.get(CONF_HP_RETURN), o.get(CONF_HP_HEAT))
-        if not all(needed) or "recorder" not in self.hass.config.components:
+        missing = [name for key, name in (
+            (CONF_HP_FLOW, "flow temperature"), (CONF_HP_OUTDOOR, "outdoor temperature"),
+        ) if not o.get(key)]
+        if not (o.get(CONF_HP_ROOM) or o.get(CONF_INDOOR)):
+            missing.append("room temperature")
+        if missing:
+            self._flow_status = ("set the heat pump's " + ", ".join(missing)
+                                 + " sensor in Flow temperature planning")
+            return
+        if "recorder" not in self.hass.config.components:
+            self._flow_status = "needs the recorder"
             return
         if self._flow_learned_at and dt_util.utcnow() - self._flow_learned_at < timedelta(
                 hours=LEARN_EVERY_HOURS):
@@ -389,7 +419,10 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._flow_learned_at = dt_util.utcnow()
             if self._flow_learned:
                 _LOGGER.info("Learned from the heat pump: %s", self._flow_learned.as_dict())
+            if self._flow_house:
+                _LOGGER.info("Learned the flow curve from history: %s", self._flow_house.as_dict())
         except Exception as err:  # noqa: BLE001 - never let learning break the forecast
+            self._flow_status = f"failed: {err}"
             _LOGGER.warning("Couldn't learn from the heat pump readings: %s", err)
 
     async def _async_learn_flow(self) -> flowlaw.Learned | None:
@@ -432,23 +465,48 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for half in (t, t + timedelta(minutes=30)):
                     if start <= half < end:
                         series[key].setdefault(half, r["mean"])
-        if "heat" not in series or "room" not in series:
+        empty = [ids[k] for k in ("flow", "room", "out") if not series.get(k)]
+        if empty:
+            self._flow_house = None
+            self._flow_status = ("no history for " + ", ".join(empty)
+                                 + " (the sensor needs state_class: measurement)")
             return None
+        nan = float("nan")
         samples = {}
-        for t, heat in series["heat"].items():
-            vals = {k: series[k].get(t) for k in ("elec", "flow", "ret", "room", "out")}
-            if vals["flow"] is None or vals["ret"] is None or vals["room"] is None:
+        for t, flow in series["flow"].items():
+            room, out = series["room"].get(t), series["out"].get(t)
+            if room is None or out is None:
                 continue
+            g = lambda k: series.get(k, {}).get(t)  # noqa: E731
             samples[t] = flowlaw.Sample(
-                heat_kw=heat, elec_kw=vals["elec"] if vals["elec"] is not None else 0.0,
-                flow=vals["flow"], ret=vals["ret"], room=vals["room"],
-                out=vals["out"] if vals["out"] is not None else float("nan"),
+                heat_kw=g("heat") if g("heat") is not None else nan,
+                elec_kw=g("elec") if g("elec") is not None else 0.0,
+                flow=flow, ret=g("ret") if g("ret") is not None else nan, room=room, out=out,
             )
+
+        # The flow curve straight from history (flow, room, outdoor).
+        h0 = float(o.get(CONF_HEAT_LOSS, 200))
+        gains = float(o.get(CONF_GAINS, 400)) / 1000
+        outs = [s.out for s in samples.values()]
+        s_settings = flowlaw.model_slope(
+            h0, gains, 21.0, float(o[CONF_EMITTER_K]), float(o[CONF_EMITTER_N]),
+            float(o[CONF_FLOW_LPM]), sum(outs) / len(outs) if outs else 5.0)
+        self._flow_house = flowlaw.fit_house(samples, s_settings)
+        hours = len(samples) / 2
+        if self._flow_house:
+            self._flow_status = (f"learned from {self._flow_house.hours:.0f} h of history"
+                                 + (" (slope from the settings: not enough variety yet)"
+                                    if self._flow_house.mode == "anchored" else ""))
+        else:
+            self._flow_status = f"only {hours:.0f} h of usable history so far; needs about a day"
+
+        samples = {t: s for t, s in samples.items()
+                   if flowlaw.is_finite(s.heat_kw, s.ret)}
         learned = flowlaw.Learned()
         fit = flowlaw.fit_emitter(samples.values(), float(o[CONF_EMITTER_N]))
         if fit:
             learned.k, learned.k_samples = fit
-        with_out = {t: s for t, s in samples.items() if flowlaw.is_finite(s.out)}
+        with_out = samples
         if with_out:
             hl = flowlaw.fit_heat_loss(
                 flowlaw.runs_of(with_out),

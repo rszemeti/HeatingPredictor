@@ -222,3 +222,124 @@ def runs_of(samples: dict, step_s: float = 1800) -> list[list[Sample]]:
 
 def is_finite(*xs: float) -> bool:
     return all(x is not None and math.isfinite(x) for x in xs)
+
+
+# ---------------------------------------------------------------- house fit
+#
+# Learned straight from history (flow, room, outdoor), without the radiator
+# and heat loss settings. Over an hour or two the house behaves like
+#
+#     d(room)/dt = a * (flow - room) - b * (room - outdoor) + c
+#
+# (radiators heating it, losses to outside, sun/people/cooking), which,
+# rearranged, is linear in three unknowns:
+#
+#     flow - room = s * (room - outdoor) + i + tau * d(room)/dt
+#
+# with s = b/a, i = -c/a, tau = 1/a (hours). Holding a room at R when it's T
+# outside then needs  flow = R + s * (R - T) + i. The measured flow includes
+# the pump's off-cycles, so this is the flow that, run steadily, delivers the
+# same heat: what a water law should be.
+
+
+@dataclass
+class HouseFit:
+    s: float                # flow-above-room per K of room-above-outdoor
+    i: float                # offset °C (negative: free gains)
+    tau: float              # hours: extra flow per °C/h of warm-up
+    hours: float
+    rmse: float
+    mode: str               # "fit": all three learned; "anchored": s from the settings
+
+    def flow(self, room: float, out: float, d_room_per_h: float = 0.0) -> float:
+        return room + self.s * (room - out) + self.i + self.tau * max(0.0, d_room_per_h)
+
+    def holds_down_to(self, room: float, flow_max: float) -> float:
+        return room - (flow_max - room - self.i) / self.s
+
+    def as_dict(self) -> dict:
+        return {"slope": round(self.s, 3), "offset": round(self.i, 2), "warmup_h": round(self.tau, 2),
+                "hours": round(self.hours, 1), "rmse": round(self.rmse, 2), "mode": self.mode}
+
+
+def house_points(samples: dict, step_s: float = 1800, half_window: int = 3
+                 ) -> list[tuple[float, float, float]]:
+    """(room - out, d(room)/dt per hour, flow - room) over each span of
+    2 * half_window half-hours (half-hour means at either end)."""
+    pts = []
+    hours = 2 * half_window * step_s / 3600
+    for run in runs_of(samples, step_s):
+        run = [s for s in run]
+        for j in range(half_window, len(run) - half_window):
+            win = run[j - half_window:j + half_window + 1]
+            if not all(is_finite(s.out, s.flow, s.room) for s in win):
+                continue
+            # Half-hour means, so the room change from the first to the last
+            # spans 2 * half_window half-hours; integrate over the same span
+            # (trapezoid weights) to keep the equation exact.
+            w = [0.5] + [1.0] * (len(win) - 2) + [0.5]
+            tw = sum(w)
+            room = sum(wi * s.room for wi, s in zip(w, win)) / tw
+            out = sum(wi * s.out for wi, s in zip(w, win)) / tw
+            flow = sum(wi * s.flow for wi, s in zip(w, win)) / tw
+            d_room = (win[-1].room - win[0].room) / hours
+            pts.append((room - out, d_room, flow - room))
+    return pts
+
+
+def _lsq(rows: list[tuple[float, ...]]) -> tuple[float, ...] | None:
+    """Least squares for y = sum(x_k * p_k) with up to 3 unknowns; the last
+    element of each row is y."""
+    n = len(rows[0]) - 1
+    ata = [[sum(r[i] * r[j] for r in rows) for j in range(n)] for i in range(n)]
+    atb = [sum(r[i] * r[n] for r in rows) for i in range(n)]
+    if n == 3:
+        return _solve3(ata, atb)
+    if n == 2:
+        d = ata[0][0] * ata[1][1] - ata[0][1] * ata[1][0]
+        if abs(d) < 1e-9:
+            return None
+        return ((atb[0] * ata[1][1] - ata[0][1] * atb[1]) / d,
+                (ata[0][0] * atb[1] - atb[0] * ata[1][0]) / d)
+    return None
+
+
+def fit_house(samples: dict, s_fallback: float | None = None, min_hours: float = 24.0,
+              step_s: float = 1800) -> HouseFit | None:
+    """Fit the house from history. If the three-way fit isn't physically
+    sensible (too little variety, e.g. a fixed flow for days), keep the slope
+    from the settings (`s_fallback`) and learn only the offset and warm-up."""
+    pts = house_points(samples, step_s)
+    hours = len(pts) * step_s / 3600
+    if hours < min_hours:
+        return None
+
+    def rmse(s, i, tau):
+        return math.sqrt(sum((y - (s * x + i + tau * d)) ** 2 for x, d, y in pts) / len(pts))
+
+    sol = _lsq([(x, 1.0, d, y) for x, d, y in pts])
+    if sol is not None:
+        s, i, tau = sol
+        # Physically sensible, and not wildly off typical houses.
+        if 0.1 <= s <= 4.0 and 0 <= tau <= 48 and -15 <= i <= 15:
+            return HouseFit(s, i, tau, hours, rmse(s, i, tau), "fit")
+    if s_fallback is None:
+        return None
+    s = s_fallback
+    sol2 = _lsq([(1.0, d, y - s * x) for x, d, y in pts])
+    if sol2 is None:
+        i, tau = sum(y - s * x for x, _, y in pts) / len(pts), 0.0
+    else:
+        i, tau = sol2
+        if not 0 <= tau <= 48:
+            tau = 0.0
+            i = sum(y - s * x for x, _, y in pts) / len(pts)
+    return HouseFit(s, i, tau, hours, rmse(s, i, tau), "anchored")
+
+
+def model_slope(h_w_per_k: float, gains_kw: float, t_room: float, k: float, n: float,
+                flow_lpm: float, around: float = 5.0) -> float:
+    """Slope of the settings-based water law (flow per K of room-above-outdoor)."""
+    f_cold = water_law(h_w_per_k, gains_kw, t_room, k, n, flow_lpm, (around - 5,))[0][1]
+    f_warm = water_law(h_w_per_k, gains_kw, t_room, k, n, flow_lpm, (around + 5,))[0][1]
+    return max(0.1, (f_cold - f_warm) / 10)

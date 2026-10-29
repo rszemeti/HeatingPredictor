@@ -69,4 +69,9 @@ async def test_learns_house_from_heat_pump_statistics(hass: HomeAssistant, fake_
     assert a["emitter_k_from"] == "learned" and a["heat_loss_from"] == "learned"
     assert len(a["plan"]) > 40
     assert all(p["flow"] is None or 25 <= p["flow"] <= 55 for p in a["plan"])
+    # The curve learned straight from flow / room / outdoor history.
+    assert a["curve_from"] == "history", a["learn_status"]
+    assert a["learn_status"].startswith("learned from"), a["learn_status"]
+    law = {p["outdoor"]: p["flow"] for p in a["water_law"]}
+    assert law[0] > law[10] > law[15]
     assert not calls                                   # advisory: nothing written

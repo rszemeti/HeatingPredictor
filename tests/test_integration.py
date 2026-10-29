@@ -474,6 +474,10 @@ async def test_flow_options_and_other_pages_keep_them(hass: HomeAssistant, fake_
     assert entry.options["flow_max_c"] == 50
     st = hass.states.get("sensor.heat_pump_flow_target")
     assert st.attributes["emitter_k"] == 0.07 and st.attributes["emitter_k_from"] == "setting"
+    # Without the heat pump's sensors it says what's missing.
+    assert st.attributes["curve_from"] == "settings"
+    assert "flow temperature" in st.attributes["learn_status"]
+    assert "outdoor temperature" in st.attributes["learn_status"]
     plan = st.attributes["plan"]
     assert all(p["flow"] is None or 26 <= p["flow"] <= 50 for p in plan)
     # Saving the heating page keeps the flow settings.
