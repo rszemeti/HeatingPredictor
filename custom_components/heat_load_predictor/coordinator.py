@@ -64,7 +64,22 @@ from .const import (
     WRITE_LEAD_MINUTES,
     STORAGE_VERSION,
     VERSION,
+    CONF_EMITTER_K,
+    CONF_EMITTER_N,
+    CONF_FLOW_LPM,
+    CONF_FLOW_MAX,
+    CONF_FLOW_MIN,
+    CONF_HP_FLOW,
+    CONF_HP_FLOW_RATE,
+    CONF_HP_HEAT,
+    CONF_HP_LEARN_DAYS,
+    CONF_HP_OUTDOOR,
+    CONF_HP_POWER,
+    CONF_HP_RETURN,
+    CONF_HP_ROOM,
+    FLOW_DEFAULTS,
 )
+from . import flowlaw
 from .learn import base_profile, half_hour_means, slot_of
 from .planner import BatteryParams, _later, cheap_ranges, make_plan, occurrences, parse_windows
 from .model import (
@@ -111,6 +126,11 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._profile: tuple[list[float], float, datetime] | None = None
         # The battery planner's inputs and output from the last run.
         self.plan_inputs: dict | None = None
+        # Flow planning: what's been learned from the heat pump, and when.
+        self._flow_learned: flowlaw.Learned | None = None
+        self._flow_learned_at: datetime | None = None
+        self._flow_correction = 0.0
+        self._flow_corr_at: datetime | None = None
         self._warned_gas: set[str] = set()
 
     # ---------------------------------------------------------------- schedule
@@ -269,12 +289,178 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             (r.end, r.t_in_end) for r in results
         ]
         data = summarise(results, now_local, self.period, indoor is not None)
+        await self._async_maybe_learn_flow()
+        data["flow"] = self._plan_flow(results, data, now_local, target)
         if self.config_entry.options.get(CONF_BATTERY_ENABLED):
             await self._async_maybe_learn()
         o = self.config_entry.options
         if o.get(CONF_BATTERY_ENABLED):
             data["battery"] = self._plan_battery(results, now_local)
         return data
+
+    # ---------------------------------------------------------------- flow
+
+    def _num(self, entity_id: str | None, unit_to: str | None = None) -> float | None:
+        """A sensor's numeric value, in kW for power and °C for temperature."""
+        state = self.hass.states.get(entity_id) if entity_id else None
+        if state is None:
+            return None
+        try:
+            v = float(state.state)
+        except ValueError:
+            return None
+        unit = state.attributes.get("unit_of_measurement")
+        if unit_to == "kW" and unit == "W":
+            return v / 1000
+        if unit_to == "°C":
+            return _to_c(v, unit)
+        return v
+
+    def _plan_flow(self, results: list, data: dict, now_local: datetime, target) -> dict:
+        """Advisory flow temperature for each period (nothing is written)."""
+        o = {**FLOW_DEFAULTS, **self.config_entry.options}
+        learned = self._flow_learned or flowlaw.Learned()
+        lpm = self._num(o.get(CONF_HP_FLOW_RATE))
+        lpm_source = "sensor"
+        if lpm is None or lpm < 2:
+            lpm, lpm_source = float(o[CONF_FLOW_LPM]), "setting"
+        k = learned.k or float(o[CONF_EMITTER_K])
+        p = flowlaw.FlowParams(
+            k=k, n=float(o[CONF_EMITTER_N]), flow_lpm=lpm,
+            flow_min=float(o[CONF_FLOW_MIN]), flow_max=float(o[CONF_FLOW_MAX]),
+        )
+        # Live correction: a slow integral of (target - room). The forecast
+        # already starts from the measured room temperature; this only takes
+        # out a steady bias (radiators or heat loss a bit off).
+        room = self._num(o.get(CONF_HP_ROOM), "°C") or self._indoor_temp()
+        now_utc = dt_util.utcnow()
+        if room is not None and self._flow_corr_at is not None:
+            dt_h = min(1.0, (now_utc - self._flow_corr_at).total_seconds() / 3600)
+            err = target(now_utc) - room
+            self._flow_correction = max(-3.0, min(3.0, self._flow_correction + 0.25 * err * dt_h))
+        self._flow_corr_at = now_utc
+
+        rows = [(r.heat_kw, (r.t_in_start + r.t_in_end) / 2) for r in results]
+        flows = flowlaw.plan_flows(rows, p, self._flow_correction)
+        cop_model = learned.cop
+        plan = []
+        for r, f, row in zip(results, flows, data["periods"]):
+            row["flow"] = f
+            item = {"start": dt_util.as_local(r.start).isoformat(), "flow": f,
+                    "heat_kw": round(r.heat_kw, 2)}
+            if cop_model and f is not None:
+                cop = flowlaw.cop_at(cop_model, r.t_out, f)
+                item["cop_learned"] = round(cop, 2)
+                item["elec_kwh_learned"] = round(r.heat_kwh / cop, 3)
+            plan.append(item)
+        h = learned.heat_loss_w_per_k or float(self.config_entry.options.get(CONF_HEAT_LOSS, 200))
+        gains = float(self.config_entry.options.get(CONF_GAINS, 400)) / 1000
+        t_room = target(now_utc)
+        return {
+            "now": flows[0] if flows else None,
+            "idle_now": bool(flows) and flows[0] is None,
+            "plan": plan,
+            "correction": round(self._flow_correction, 2),
+            "emitter_k": round(k, 4),
+            "emitter_k_from": "learned" if learned.k else "setting",
+            "flow_rate_lpm": round(lpm, 1),
+            "flow_rate_from": lpm_source,
+            "heat_loss_w_per_k": round(h),
+            "heat_loss_from": "learned" if learned.heat_loss_w_per_k else "setting",
+            "water_law": [{"outdoor": t, "flow": f} for t, f in flowlaw.water_law(
+                h, gains, t_room, k, p.n, lpm)],
+            "holds_target_down_to": round(flowlaw.balance_point(
+                h, gains, t_room, k, p.n, lpm, p.flow_max), 1),
+            "learned": learned.as_dict(),
+            "learned_at": self._flow_learned_at.isoformat() if self._flow_learned_at else None,
+        }
+
+    async def _async_maybe_learn_flow(self) -> None:
+        o = self.config_entry.options
+        needed = (o.get(CONF_HP_FLOW), o.get(CONF_HP_RETURN), o.get(CONF_HP_HEAT))
+        if not all(needed) or "recorder" not in self.hass.config.components:
+            return
+        if self._flow_learned_at and dt_util.utcnow() - self._flow_learned_at < timedelta(
+                hours=LEARN_EVERY_HOURS):
+            return
+        try:
+            self._flow_learned = await self._async_learn_flow()
+            self._flow_learned_at = dt_util.utcnow()
+            if self._flow_learned:
+                _LOGGER.info("Learned from the heat pump: %s", self._flow_learned.as_dict())
+        except Exception as err:  # noqa: BLE001 - never let learning break the forecast
+            _LOGGER.warning("Couldn't learn from the heat pump readings: %s", err)
+
+    async def _async_learn_flow(self) -> flowlaw.Learned | None:
+        """Half-hourly heat pump readings from statistics, then fit K, H, COP."""
+        from homeassistant.components.recorder.statistics import statistics_during_period
+        from homeassistant.helpers.recorder import get_instance
+
+        o = {**FLOW_DEFAULTS, **self.config_entry.options}
+        ids = {
+            "heat": o.get(CONF_HP_HEAT), "elec": o.get(CONF_HP_POWER),
+            "flow": o.get(CONF_HP_FLOW), "ret": o.get(CONF_HP_RETURN),
+            "room": o.get(CONF_HP_ROOM) or o.get(CONF_INDOOR),
+            "out": o.get(CONF_HP_OUTDOOR),
+        }
+        ids = {k: v for k, v in ids.items() if v}
+        end = align_down(dt_util.now(), 30)
+        start = end - timedelta(days=int(o[CONF_HP_LEARN_DAYS]))
+        rec = get_instance(self.hass)
+
+        def fetch(period: str) -> dict:
+            return statistics_during_period(
+                self.hass, dt_util.as_utc(start), dt_util.as_utc(end), set(ids.values()),
+                period, {"power": "kW", "temperature": "°C"}, {"mean"},
+            )
+
+        five = await rec.async_add_executor_job(fetch, "5minute")
+        hourly = await rec.async_add_executor_job(fetch, "hour")
+        series = {}
+        for key, eid in ids.items():
+            series[key] = half_hour_means(
+                [(dt_util.as_local(dt_util.utc_from_timestamp(r["start"])), r["mean"])
+                 for r in five.get(eid, []) if r.get("mean") is not None],
+                start, end,
+            )
+            # Older half-hours that only have hourly statistics.
+            for r in hourly.get(eid, []):
+                if r.get("mean") is None:
+                    continue
+                t = dt_util.as_local(dt_util.utc_from_timestamp(r["start"]))
+                for half in (t, t + timedelta(minutes=30)):
+                    if start <= half < end:
+                        series[key].setdefault(half, r["mean"])
+        if "heat" not in series or "room" not in series:
+            return None
+        samples = {}
+        for t, heat in series["heat"].items():
+            vals = {k: series[k].get(t) for k in ("elec", "flow", "ret", "room", "out")}
+            if vals["flow"] is None or vals["ret"] is None or vals["room"] is None:
+                continue
+            samples[t] = flowlaw.Sample(
+                heat_kw=heat, elec_kw=vals["elec"] if vals["elec"] is not None else 0.0,
+                flow=vals["flow"], ret=vals["ret"], room=vals["room"],
+                out=vals["out"] if vals["out"] is not None else float("nan"),
+            )
+        learned = flowlaw.Learned()
+        fit = flowlaw.fit_emitter(samples.values(), float(o[CONF_EMITTER_N]))
+        if fit:
+            learned.k, learned.k_samples = fit
+        with_out = {t: s for t, s in samples.items() if flowlaw.is_finite(s.out)}
+        if with_out:
+            hl = flowlaw.fit_heat_loss(
+                flowlaw.runs_of(with_out),
+                float(self.config_entry.options.get(CONF_GAINS, 400)) / 1000,
+                float(self.config_entry.options.get(CONF_CAPACITY, 10)),
+            )
+            if hl:
+                learned.heat_loss_w_per_k, learned.heat_loss_hours = hl
+            if "elec" in series:
+                cop = flowlaw.fit_cop(with_out.values())
+                if cop:
+                    learned.cop, learned.cop_samples = cop
+        return learned
 
     def _carried_tin(self, when: datetime) -> float | None:
         """Previous run's modelled indoor temperature at `when`, if it covers it."""

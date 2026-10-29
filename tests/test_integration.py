@@ -459,3 +459,29 @@ async def test_storage_mode_room_uses_optimistic_solar(hass: HomeAssistant, fake
     d = (await client.receive_json())["result"]
     assert d["pv_high_kwh"] is not None
     assert max(d["pv_high_kwh"]) == pytest.approx(max(d["pv_kwh"]) * 1.2, rel=0.02)
+
+
+async def test_flow_options_and_other_pages_keep_them(hass: HomeAssistant, fake_weather) -> None:
+    """The flow planning page saves its settings; saving the heating page keeps them."""
+    entry = await _setup(hass, dict(OPTIONS))
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "flow"})
+    assert result["step_id"] == "flow"
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {
+        "flow_min_c": 26, "flow_max_c": 50, "flow_rate_lpm": 14.5, "emitter_k": 0.07,
+        "emitter_exponent": 1.3, "hp_learn_days": 7})
+    await hass.async_block_till_done()
+    assert entry.options["flow_max_c"] == 50
+    st = hass.states.get("sensor.heat_pump_flow_target")
+    assert st.attributes["emitter_k"] == 0.07 and st.attributes["emitter_k_from"] == "setting"
+    plan = st.attributes["plan"]
+    assert all(p["flow"] is None or 26 <= p["flow"] <= 50 for p in plan)
+    # Saving the heating page keeps the flow settings.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "heating"})
+    heating = {k: v for k, v in entry.options.items() if k in OPTIONS}
+    heating["period_minutes"] = str(heating.get("period_minutes", 30))
+    heating["horizon_hours"] = heating.get("horizon_hours", 48)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], heating)
+    await hass.async_block_till_done()
+    assert entry.options["flow_max_c"] == 50

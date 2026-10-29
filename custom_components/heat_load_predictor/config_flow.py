@@ -28,6 +28,21 @@ from .const import (
     CONF_CHEAP_TOLERANCE,
     CONF_HOUSE_LOAD,
     CONF_HP_SINCE,
+    CONF_EMITTER_K,
+    CONF_EMITTER_N,
+    CONF_FLOW_LPM,
+    CONF_FLOW_MAX,
+    CONF_FLOW_MIN,
+    CONF_HP_FLOW,
+    CONF_HP_FLOW_RATE,
+    CONF_HP_HEAT,
+    CONF_HP_LEARN_DAYS,
+    CONF_HP_OUTDOOR,
+    CONF_HP_POWER,
+    CONF_HP_RETURN,
+    CONF_HP_ROOM,
+    FLOW_DEFAULTS,
+    FLOW_KEYS,
     CONF_LEARN_DAYS,
     CONF_LOAD_MARGIN,
     CONF_CHARGE_STRATEGY,
@@ -241,14 +256,15 @@ class HeatLoadPredictorOptionsFlow(OptionsFlow):
     """Change the predictor's settings: heating model or battery planner."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        return self.async_show_menu(step_id="init", menu_options=["heating", "battery"])
+        return self.async_show_menu(step_id="init", menu_options=["heating", "battery", "flow"])
 
     async def async_step_heating(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             errors = _validate(user_input)
             if not errors:
-                keep = {k: v for k, v in self.config_entry.options.items() if k in BATTERY_KEYS}
+                keep = {k: v for k, v in self.config_entry.options.items()
+                        if k in BATTERY_KEYS or k in FLOW_KEYS}
                 return self.async_create_entry(data={**keep, **_clean(user_input)})
         current = user_input or dict(self.config_entry.options)
         return self.async_show_form(
@@ -269,6 +285,38 @@ class HeatLoadPredictorOptionsFlow(OptionsFlow):
         return self.async_show_form(
             step_id="battery", data_schema=_battery_schema(current), errors=errors
         )
+
+
+    async def async_step_flow(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Heat pump readings and flow temperature planning (advisory)."""
+        if user_input is not None:
+            keep = {k: v for k, v in self.config_entry.options.items() if k not in FLOW_KEYS}
+            return self.async_create_entry(data={**keep, **user_input})
+        current = dict(self.config_entry.options)
+        return self.async_show_form(step_id="flow", data_schema=_flow_schema(current))
+
+
+def _flow_schema(current: dict[str, Any]) -> vol.Schema:
+    d = {**FLOW_DEFAULTS, **current}
+    fields: dict[Any, Any] = {}
+    for key, cfg in (
+        (CONF_HP_FLOW, {"domain": "sensor", "device_class": "temperature"}),
+        (CONF_HP_RETURN, {"domain": "sensor", "device_class": "temperature"}),
+        (CONF_HP_FLOW_RATE, {"domain": "sensor"}),
+        (CONF_HP_HEAT, {"domain": "sensor", "device_class": "power"}),
+        (CONF_HP_POWER, {"domain": "sensor", "device_class": "power"}),
+        (CONF_HP_ROOM, {"domain": "sensor", "device_class": "temperature"}),
+        (CONF_HP_OUTDOOR, {"domain": "sensor", "device_class": "temperature"}),
+    ):
+        k, v = _optional_entity(key, current, **cfg)
+        fields[k] = v
+    fields[vol.Required(CONF_FLOW_MIN, default=d[CONF_FLOW_MIN])] = _number(15, 60, 0.5, "°C")
+    fields[vol.Required(CONF_FLOW_MAX, default=d[CONF_FLOW_MAX])] = _number(25, 75, 0.5, "°C")
+    fields[vol.Required(CONF_FLOW_LPM, default=d[CONF_FLOW_LPM])] = _number(1, 100, 0.1, "L/min")
+    fields[vol.Required(CONF_EMITTER_K, default=d[CONF_EMITTER_K])] = _number(0.005, 1, 0.001, "kW/K^n")
+    fields[vol.Required(CONF_EMITTER_N, default=d[CONF_EMITTER_N])] = _number(1.0, 1.6, 0.05, "")
+    fields[vol.Required(CONF_HP_LEARN_DAYS, default=d[CONF_HP_LEARN_DAYS])] = _number(1, 30, 1, "days")
+    return vol.Schema(fields)
 
 
 BATTERY_KEYS = set(BATTERY_DEFAULTS) | {

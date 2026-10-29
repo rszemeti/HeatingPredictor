@@ -7,12 +7,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.sensor import (
+    SensorStateClass,
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
+from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -85,6 +86,7 @@ async def async_setup_entry(
             BatteryMinSocSensor(coordinator),
             BatteryNextWriteSensor(coordinator),
         ]
+    entities.append(FlowTargetSensor(coordinator))
     async_add_entities(entities)
 
 
@@ -212,3 +214,37 @@ class BatteryNextWriteSensor(_BatteryBase):
     def extra_state_attributes(self) -> dict[str, Any] | None:
         plan = self._plan
         return {"slots": plan["next_write_slots"]} if plan else None
+
+
+class FlowTargetSensor(CoordinatorEntity[HeatLoadCoordinator], SensorEntity):
+    """Advisory flow temperature for now; the per-period plan and what's been
+    learned in attributes. Nothing is written to the heat pump."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "flow_target"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _unrecorded_attributes = frozenset({"plan", "water_law", "learned"})
+
+    def __init__(self, coordinator: HeatLoadCoordinator) -> None:
+        super().__init__(coordinator)
+        entry = coordinator.config_entry
+        self._attr_unique_id = f"{entry.entry_id}_flow_target"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)})
+
+    @property
+    def _flow(self) -> dict[str, Any] | None:
+        return (self.coordinator.data or {}).get("flow")
+
+    @property
+    def native_value(self) -> float | None:
+        f = self._flow
+        return None if not f else f["now"]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        f = self._flow
+        if not f:
+            return None
+        return {k: v for k, v in f.items() if k != "now"}

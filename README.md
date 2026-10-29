@@ -212,6 +212,18 @@ The planner works in UTC throughout, so clock changes don't move anything. Times
 
 For other inverters, read the same `slots` attribute and write the equivalent settings.
 
+## Flow temperature planning (advisory)
+
+Under **Configure → Flow temperature planning**, point the integration at your heat pump's own readings (flow, return, flow rate, heat out, electricity in, room and outdoor temperatures). It then:
+
+- **Plans a flow temperature for every period** from the heat model: the heat each period needs to follow your schedule, turned into a flow temperature with the radiator equation, output = K × (mean water temperature − room)^1.3, plus half the flow-to-return drop at your flow rate. Limited to your lowest and highest flow temperatures, in 0.5 °C steps. Periods where the heat pump can idle show as idle.
+- **Learns your house** from the heat pump's history (5-minute statistics, hourly for older days), every 6 hours: the radiator constant K from steady running, the heat loss from a heat balance over whole days (including losses on the way to the house), and the COP as a function of outdoor and flow temperature.
+- **Corrects slowly:** a small integral of (target − room) shifts the plan to take out any steady bias.
+
+`sensor.heat_pump_flow_target` holds the flow temperature for now. Its attributes have the per-period plan (with learned COP and electricity where available), what's been learned and where each figure comes from, the steady-state water law at your target temperature, and the lowest outdoor temperature your highest flow temperature can hold the target at. The card shows each period's planned flow temperature when you hover a bar.
+
+Nothing is written to the heat pump. Compare the plan with what the pump does for a few days before acting on it.
+
 ## How the model works
 
 The house is treated as one thermal mass:

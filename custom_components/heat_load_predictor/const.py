@@ -1,7 +1,7 @@
 """Constants for Heat Load Predictor."""
 
 DOMAIN = "heat_load_predictor"
-VERSION = "0.3.15"
+VERSION = "0.4.0"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR = "indoor_temp_entity"
@@ -83,3 +83,29 @@ CONF_LEARN_DAYS = "learn_days"
 BATTERY_DEFAULTS[CONF_LEARN_DAYS] = 10
 LEARN_EVERY_HOURS = 6
 CONF_HP_SINCE = "heat_pump_since"
+
+# Flow temperature planning (advisory): the heat pump's own readings.
+CONF_HP_FLOW = "hp_flow_entity"
+CONF_HP_RETURN = "hp_return_entity"
+CONF_HP_FLOW_RATE = "hp_flow_rate_entity"
+CONF_HP_HEAT = "hp_heat_entity"          # heat out, W or kW
+CONF_HP_POWER = "hp_power_entity"        # electricity in, W or kW
+CONF_HP_ROOM = "hp_room_entity"
+CONF_HP_OUTDOOR = "hp_outdoor_entity"
+CONF_FLOW_MIN = "flow_min_c"
+CONF_FLOW_MAX = "flow_max_c"
+CONF_EMITTER_N = "emitter_exponent"
+CONF_EMITTER_K = "emitter_k"             # kW/K^n, used until learned
+CONF_FLOW_LPM = "flow_rate_lpm"          # used if no flow rate sensor
+CONF_HP_LEARN_DAYS = "hp_learn_days"
+FLOW_DEFAULTS = {
+    CONF_FLOW_MIN: 25.0,
+    CONF_FLOW_MAX: 55.0,
+    CONF_EMITTER_N: 1.3,
+    CONF_EMITTER_K: 0.065,
+    CONF_FLOW_LPM: 14.5,
+    CONF_HP_LEARN_DAYS: 7,
+}
+FLOW_ENTITY_KEYS = (CONF_HP_FLOW, CONF_HP_RETURN, CONF_HP_FLOW_RATE, CONF_HP_HEAT,
+                    CONF_HP_POWER, CONF_HP_ROOM, CONF_HP_OUTDOOR)
+FLOW_KEYS = set(FLOW_DEFAULTS) | set(FLOW_ENTITY_KEYS)

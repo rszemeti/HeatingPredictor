@@ -543,7 +543,7 @@ class HeatLoadScheduleCard extends HTMLElement {
     if (!row) return;
     const s = toMin(start.slice(11, 16)), per = this._guessPeriod();
     this._tip.innerHTML = `<b>${toHHMM(s)}–${toHHMM((s + per) % 1440)}</b> · ${row.kwh.toFixed(2)} kWh<br>
-      Outdoor ${row.t_out}°C · COP ${row.cop}<br>Indoor ${row.t_in}°C (target ${row.t_target}°C)${row.shortfall_k > 0.05 ? `<br><span class="err">Short by ${row.shortfall_k} K</span>` : ""}${this._batteryAt(start)}`;
+      Outdoor ${row.t_out}°C · COP ${row.cop}<br>Indoor ${row.t_in}°C (target ${row.t_target}°C)${"flow" in row ? `<br>Flow ${row.flow == null ? "idle" : row.flow + "°C"} (planned)` : ""}${row.shortfall_k > 0.05 ? `<br><span class="err">Short by ${row.shortfall_k} K</span>` : ""}${this._batteryAt(start)}`;
     this._placeTip(e);
   }
 
