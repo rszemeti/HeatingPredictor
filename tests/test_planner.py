@@ -422,6 +422,9 @@ def test_property_never_below_reserve_before_next_window():
                         acts[i] = ("charge", w.target_soc)
         charge_starts = sorted(w.start for w in plan.windows if w.kind == "charge")
         shortish = {w.start for w in plan.windows if "charge rate too low" in w.reason}
+        # Before a day the solar fills the battery, the floor (not the
+        # reserve) is the limit: the battery may run down as the solar arrives.
+        spill = {w.start for w in plan.windows if "solar will fill" in w.reason}
         s, path = soc0, []
         for i, t in enumerate(starts):
             s = pl._step(s, acts.get(i), pv[i], load[i], 0.5, p)
@@ -434,7 +437,8 @@ def test_property_never_below_reserve_before_next_window():
             start_soc = next((v for t, v in path if t == w0), soc0)
             if start_soc < p.reserve_soc:
                 continue        # started the window below reserve already; can only recover
-            assert low >= p.reserve_soc - 1e-6, (case, start, w0, low)
+            limit = p.min_soc if w0 in spill else p.reserve_soc
+            assert low >= limit - 1e-6, (case, start, w0, low)
 
 
 def test_fills_the_late_window_instead_of_scraping_through():
@@ -608,7 +612,7 @@ def test_real_no_grid_charge_while_exporting():
     mode is only Feed-in priority when there's spare solar."""
     d, starts, plan = _replay("plan_2026-10-26_feedin.json")
     aft = find(plan, "charge", datetime(2026, 10, 27, 13, tzinfo=timezone.utc))
-    assert not aft.enabled and "on its own" in aft.reason, aft.reason
+    assert not aft.enabled and ("on its own" in aft.reason or "solar will fill" in aft.reason), aft.reason
     for i, (t, m) in enumerate(plan.modes):
         if m != "Self-Use":
             assert d["pv_kwh"][i] > d["load_kwh"][i], (t, m)                 # no feed-in at night
@@ -645,3 +649,19 @@ def test_real_44kwh_day_stores_before_feeding_in():
     # The 13:00 window still isn't needed: the solar fills the battery.
     aft = find(plan, "charge", datetime(2026, 10, 27, 13, tzinfo=timezone.utc))
     assert not aft.enabled, aft.reason
+
+
+def test_real_dont_buy_what_the_solar_will_supply():
+    """Regression (29 Oct, real data): the 04:00 window bought 83% -> 89%,
+    then the morning was Feed-in priority and the solar filled the battery by
+    13:00 anyway, so the grid power only displaced exported solar. Windows
+    before a day the solar fills the battery now buy nothing beyond carrying
+    the house to the solar, and a night window buys only what the next day's
+    solar can't top up."""
+    d, starts, plan = _replay("plan_2026-10-29_nobuy.json")
+    utc = lambda day, h: datetime(2026, 10, day, h, tzinfo=timezone.utc)
+    assert not find(plan, "charge", utc(29, 4)).enabled
+    assert not find(plan, "charge", utc(29, 13)).enabled
+    night = find(plan, "charge", utc(29, 22))
+    assert night.target_soc < 100, night.reason
+    assert min(v for _, v in plan.soc) > d["params"]["reserve_soc"]

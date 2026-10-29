@@ -435,7 +435,13 @@ def make_plan(
             # Cheap power is the cheapest there is: fill as far as tomorrow's
             # solar allows, rather than gambling on just scraping through.
             just_enough = _lowest_target(lowest, projected, params)
-            if just_enough is not None and just_enough > fill_to:
+            # If the solar will fill the battery anyway within the next day,
+            # grid power bought now only displaces solar that then gets
+            # exported (or clipped): buy just what carries the house until the
+            # solar takes over, nothing more.
+            solar_fills = _solar_fills(pv_kwh, load_kwh, a, b, b + day_periods,
+                                       projected, dt_h, params)
+            if solar_fills or (just_enough is not None and just_enough > fill_to):
                 target, enabled, reason = _spill_day_charge(
                     pv_cautious, load_cautious, a, b, gap_end, projected, dt_h, params, fill_to)
             elif fill_to > projected + 0.5 and _grid_into(
@@ -444,10 +450,25 @@ def make_plan(
                 target, enabled = fill_to, False
                 reason = f"the solar will fill the battery to {fill_to}% on its own"
             elif fill_to > projected + 0.5:
-                target, enabled = fill_to, True
-                reason = f"fill to {target}% on cheap power"
-                if fill_to < 100:
-                    reason += f" (the rest is room for {room:.1f} kWh of solar)"
+                # Buy only what the next day's solar can't top up: the smallest
+                # target from which the solar still fills the battery. (If the
+                # solar falls short, the next cheap window tops up.)
+                floor_t = max(int(math.ceil(projected)), int(params.min_soc),
+                              just_enough or 0)
+                target = fill_to
+                for t_ in range(floor_t, fill_to):
+                    if _solar_fills_after_charge(pv_kwh, load_kwh, a, b, b + day_periods,
+                                                 projected, t_, dt_h, params):
+                        target = t_
+                        break
+                enabled = True
+                if target < fill_to:
+                    reason = (f"charge to {target}% on cheap power; the solar fills "
+                              f"the rest tomorrow")
+                else:
+                    reason = f"fill to {target}% on cheap power"
+                    if fill_to < 100:
+                        reason += f" (the rest is room for {room:.1f} kWh of solar)"
                 if lowest(target) < params.reserve_soc - 1e-6:
                     reason += " (charge rate too low to cover it all)"
             elif just_enough is not None:
@@ -576,6 +597,29 @@ def _lowest_target(lowest, projected: float, p: BatteryParams) -> int | None:
         else:
             lo = mid + 1
     return hi
+
+
+def _solar_fills(pv, load, a: int, b: int, end: int, soc: float, dt_h: float,
+                 p: BatteryParams) -> bool:
+    """Would the battery reach 100% from solar alone before period `end`, if
+    the window [a, b) bought nothing (expected forecasts, self-use)?"""
+    for i in range(a, min(end, len(pv))):
+        soc = _step(soc, None, pv[i], load[i], dt_h, p)
+        if soc >= 99.5:
+            return True
+    return False
+
+
+def _solar_fills_after_charge(pv, load, a: int, b: int, end: int, soc: float,
+                              target: float, dt_h: float, p: BatteryParams) -> bool:
+    """With a charge to `target` over [a, b), does the solar then fill the
+    battery to 100% before period `end` (expected forecasts, self-use)?"""
+    for i in range(a, min(end, len(pv))):
+        act = ("charge", target) if i < b else None
+        soc = _step(soc, act, pv[i], load[i], dt_h, p)
+        if i >= b and soc >= 99.5:
+            return True
+    return False
 
 
 def _grid_into(soc: float, target: float, a: int, b: int, pv, load, dt_h: float,
