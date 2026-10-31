@@ -133,7 +133,7 @@
       },
       "flow": {
         "title": "Flow temperature planning",
-        "description": "Advisory: plans a flow temperature for each period from the heat model and learns your house from the heat pump's own readings. Nothing is written to the heat pump.",
+        "description": "Plans a flow temperature for each period and learns your house from the heat pump's own readings. Nothing is written to the heat pump unless you turn on the Flow control switch, and then only to the flow target entity set here.",
         "data": {
           "hp_flow_entity": "Flow (leaving water) temperature",
           "hp_return_entity": "Return temperature",
@@ -147,13 +147,15 @@
           "flow_rate_lpm": "Flow rate (if no sensor)",
           "emitter_k": "Radiator constant (until learned)",
           "emitter_exponent": "Radiator exponent",
-          "hp_learn_days": "Learn from the last"
+          "hp_learn_days": "Learn from the last",
+          "hp_flow_target_entity": "Heat pump flow target (written by Flow control)"
         },
         "data_description": {
           "hp_heat_entity": "Heat delivered by the heat pump (W or kW). With electricity in, used to learn the real COP.",
           "hp_room_entity": "Used for learning. For the forecast itself, set the indoor temperature sensor in Heating model.",
           "emitter_k": "Radiator output = K x (mean water temperature - room)^n. Learned from the readings once there's enough steady running.",
-          "emitter_exponent": "1.3 for radiators, about 1.1 for underfloor heating."
+          "emitter_exponent": "1.3 for radiators, about 1.1 for underfloor heating.",
+          "hp_flow_target_entity": "The number entity that sets the heat pump's flow temperature, e.g. the ESPHome flow target. The heat pump must be on a fixed flow temperature (its own water law off) for this to take effect."
         }
       }
     },
@@ -193,6 +195,11 @@
       },
       "flow_target": {
         "name": "Flow target"
+      }
+    },
+    "switch": {
+      "flow_control": {
+        "name": "Flow control"
       }
     }
   },

@@ -75,6 +75,8 @@ from .const import (
     CONF_HP_HEAT,
     CONF_HP_LEARN_DAYS,
     CONF_HP_OUTDOOR,
+    CONF_HP_FLOW_TARGET,
+    FLOW_WRITE_MIN_MINUTES,
     CONF_HP_POWER,
     CONF_HP_RETURN,
     CONF_HP_ROOM,
@@ -133,6 +135,12 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._flow_house: flowlaw.HouseFit | None = None
         self._flow_status = "not run yet"
         self._flow_correction = 0.0
+        # Flow control (the switch): off unless turned on.
+        self.flow_control = False
+        self.flow_restore_to: float | None = None
+        self._flow_written: float | None = None
+        self._flow_written_at: datetime | None = None
+        self._flow_control_status = "off"
         self._flow_corr_at: datetime | None = None
         self._warned_gas: set[str] = set()
 
@@ -294,6 +302,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data = summarise(results, now_local, self.period, indoor is not None)
         await self._async_maybe_learn_flow()
         data["flow"] = self._plan_flow(results, data, now_local, target)
+        await self._async_control_flow(data["flow"])
         if self.config_entry.options.get(CONF_BATTERY_ENABLED):
             await self._async_maybe_learn()
         o = self.config_entry.options
@@ -395,6 +404,97 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 flowlaw.balance_point(h, gains, t_room, k, p.n, lpm, p.flow_max), 1),
             "learned": learned.as_dict(),
             "learned_at": self._flow_learned_at.isoformat() if self._flow_learned_at else None,
+        }
+
+    # ------------------------------------------------------------ flow control
+
+    def _flow_target_state(self) -> tuple[str | None, Any]:
+        eid = self.config_entry.options.get(CONF_HP_FLOW_TARGET)
+        return eid, (self.hass.states.get(eid) if eid else None)
+
+    async def _async_write_flow(self, eid: str, value: float) -> None:
+        await self.hass.services.async_call(
+            "number", "set_value", {"entity_id": eid, "value": value}, blocking=True)
+        self._flow_written, self._flow_written_at = value, dt_util.utcnow()
+        _LOGGER.info("Flow control: %s -> %s °C", eid, value)
+
+    async def async_set_flow_control(self, on: bool) -> None:
+        """Called by the switch. On: remember the pump's flow target so it can
+        be put back. Off: put it back."""
+        eid, st = self._flow_target_state()
+        if on and not self.flow_control:
+            try:
+                self.flow_restore_to = float(st.state) if st else None
+            except ValueError:
+                self.flow_restore_to = None
+            self._flow_written_at = None          # write straight away
+        if not on and self.flow_control and eid and self.flow_restore_to is not None:
+            try:
+                await self._async_write_flow(eid, self.flow_restore_to)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("Flow control: couldn't put back %s: %s", eid, err)
+        self.flow_control = on
+        if not on:
+            self._flow_control_status = "off"
+        await self.async_request_refresh()
+
+    async def _async_control_flow(self, flow: dict) -> None:
+        """Write the planned flow for now to the heat pump, if Flow control is on.
+
+        Only when it has changed by at least a step, at most once per run,
+        and only with a live room reading (the correction depends on it)."""
+        flow["control"] = self._flow_control_info()
+        if not self.flow_control:
+            self._flow_control_status = "off"
+            flow["control"] = self._flow_control_info()
+            return
+        o = {**FLOW_DEFAULTS, **self.config_entry.options}
+        eid, st = self._flow_target_state()
+        status = None
+        if not eid:
+            status = "holding: set the heat pump flow target entity in Flow temperature planning"
+        elif st is None or st.state in ("unavailable", "unknown"):
+            status = "holding: the heat pump's flow target is unavailable"
+        elif (self._num(o.get(CONF_HP_ROOM), "°C") or self._indoor_temp()) is None:
+            status = "holding: no room temperature reading"
+        if status:
+            self._flow_control_status = status
+            flow["control"] = self._flow_control_info()
+            return
+        attrs = st.attributes
+        step = float(attrs.get("step") or 0.5)
+        lo = max(float(o[CONF_FLOW_MIN]), float(attrs.get("min", -100)))
+        hi = min(float(o[CONF_FLOW_MAX]), float(attrs.get("max", 100)))
+        # Idle: the lowest flow, so the heat pump stops on its own.
+        want = flow["now"] if flow["now"] is not None else lo
+        want = round(min(hi, max(lo, want)) / step) * step
+        want = round(want, 2)
+        try:
+            cur = float(st.state)
+        except ValueError:
+            cur = None
+        now = dt_util.utcnow()
+        if cur is not None and abs(want - cur) < max(step, 0.5) - 1e-6:
+            self._flow_control_status = f"holding {cur:g} °C (plan {want:g} °C)"
+        elif self._flow_written_at and now - self._flow_written_at < timedelta(minutes=FLOW_WRITE_MIN_MINUTES):
+            self._flow_control_status = f"waiting to write {want:g} °C (wrote recently)"
+        else:
+            try:
+                await self._async_write_flow(eid, want)
+                self._flow_control_status = f"wrote {want:g} °C" + (" (idle)" if flow["now"] is None else "")
+            except Exception as err:  # noqa: BLE001 - never let control break the forecast
+                self._flow_control_status = f"write failed: {err}"
+                _LOGGER.warning("Flow control: couldn't write %s: %s", eid, err)
+        flow["control"] = self._flow_control_info()
+
+    def _flow_control_info(self) -> dict:
+        return {
+            "on": self.flow_control,
+            "status": self._flow_control_status,
+            "entity": self.config_entry.options.get(CONF_HP_FLOW_TARGET),
+            "last_written": self._flow_written,
+            "last_written_at": self._flow_written_at.isoformat() if self._flow_written_at else None,
+            "restore_to": self.flow_restore_to,
         }
 
     async def _async_maybe_learn_flow(self) -> None:
@@ -792,6 +892,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.plan_inputs = {
             "version": VERSION,
             "made_at": now_local.isoformat(),
+            "time_zone": str(self.hass.config.time_zone),
             "period_minutes": self.period,
             "starts": [t.isoformat() for t in starts],
             "heat_kwh": [round(r.elec_kwh, 4) for r in results],

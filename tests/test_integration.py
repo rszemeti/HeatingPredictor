@@ -419,7 +419,11 @@ async def test_plan_data_download_replays_to_the_same_plan(hass: HomeAssistant, 
     assert msg["success"], msg
     d = json.loads(json.dumps(msg["result"]))
     assert d["soc_now"] == 40 and len(d["starts"]) == len(d["load_kwh"]) == len(d["pv_kwh"])
-    starts = [_dt.fromisoformat(t) for t in d["starts"]]
+    # Local wall-clock windows need the real time zone, not fixed offsets,
+    # when the horizon crosses a clock change.
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(d["time_zone"])
+    starts = [_dt.fromisoformat(t).astimezone(tz) for t in d["starts"]]
     ranges = [(_dt.fromisoformat(a), _dt.fromisoformat(b)) for a, b in d["charge_ranges"]] \
         if d["charge_ranges"] is not None else None
     plan = pl.make_plan(
@@ -489,3 +493,59 @@ async def test_flow_options_and_other_pages_keep_them(hass: HomeAssistant, fake_
     result = await hass.config_entries.options.async_configure(result["flow_id"], heating)
     await hass.async_block_till_done()
     assert entry.options["flow_max_c"] == 50
+
+
+async def test_flow_control_switch(hass: HomeAssistant, fake_weather, freezer) -> None:
+    """Off by default and writes nothing; on writes the plan (within the
+    entity's limits, at most once per run); off puts the old value back."""
+    hass.states.async_set("number.hp_flow_target", "32.0", {"min": 25, "max": 55, "step": 0.5})
+    hass.states.async_set("sensor.hp_room", "21.5", {"unit_of_measurement": "°C"})
+    calls = []
+
+    async def set_value(call):
+        calls.append(call.data["value"])
+        hass.states.async_set("number.hp_flow_target", str(call.data["value"]),
+                              {"min": 25, "max": 55, "step": 0.5})
+    hass.services.async_register("number", "set_value", set_value)
+
+    entry = await _setup(hass, {**OPTIONS, "hp_flow_target_entity": "number.hp_flow_target",
+                                "hp_room_entity": "sensor.hp_room"})
+    sw = hass.states.get("switch.heat_pump_flow_control")
+    assert sw is not None and sw.state == "off", [s.entity_id for s in hass.states.async_all("switch")]
+    coord = entry.runtime_data
+    await coord.async_refresh()
+    assert not calls
+
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.heat_pump_flow_control"}, blocking=True)
+    await hass.async_block_till_done()
+    plan = hass.states.get("sensor.heat_pump_flow_target")
+    want = plan.state if plan.state not in ("unknown", "unavailable") else None
+    ctl = plan.attributes["control"]
+    assert ctl["on"] and ctl["restore_to"] == 32.0
+    assert len(calls) == 1, ctl
+    if calls:
+        v = calls[-1]
+        assert 25 <= v <= 55 and v * 2 == int(v * 2)
+        if want is not None:
+            assert v == float(want)
+        else:
+            assert v == 25                     # idle: the lowest flow
+    # Another run straight away doesn't write again.
+    n = len(calls)
+    hass.states.async_set("number.hp_flow_target", "40.0", {"min": 25, "max": 55, "step": 0.5})
+    await coord.async_refresh()
+    assert len(calls) == n
+    # No room reading: holds.
+    hass.states.async_set("sensor.hp_room", "unavailable")
+    freezer.tick(timedelta(minutes=20))
+    await coord.async_refresh()
+    assert "no room temperature" in coord.data["flow"]["control"]["status"]
+    # Off: the original value goes back.
+    await hass.services.async_call("switch", "turn_off", {"entity_id": "switch.heat_pump_flow_control"}, blocking=True)
+    await hass.async_block_till_done()
+    assert calls[-1] == 32.0
+    m = len(calls)
+    freezer.tick(timedelta(minutes=20))
+    hass.states.async_set("sensor.hp_room", "21.5", {"unit_of_measurement": "°C"})
+    await coord.async_refresh()
+    assert len(calls) == m

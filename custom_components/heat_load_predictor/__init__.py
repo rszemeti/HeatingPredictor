@@ -29,7 +29,7 @@ from .const import CARD_URL, DOMAIN, VERSION
 from .coordinator import HeatLoadCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 ATTR_ENTRY = "config_entry_id"

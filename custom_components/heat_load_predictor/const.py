@@ -1,7 +1,7 @@
 """Constants for Heat Load Predictor."""
 
 DOMAIN = "heat_load_predictor"
-VERSION = "0.4.3"
+VERSION = "0.5.0"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR = "indoor_temp_entity"
@@ -92,6 +92,8 @@ CONF_HP_HEAT = "hp_heat_entity"          # heat out, W or kW
 CONF_HP_POWER = "hp_power_entity"        # electricity in, W or kW
 CONF_HP_ROOM = "hp_room_entity"
 CONF_HP_OUTDOOR = "hp_outdoor_entity"
+CONF_HP_FLOW_TARGET = "hp_flow_target_entity"   # number: what control writes to
+FLOW_WRITE_MIN_MINUTES = 14   # at most one write per coordinator run (15 min)
 CONF_FLOW_MIN = "flow_min_c"
 CONF_FLOW_MAX = "flow_max_c"
 CONF_EMITTER_N = "emitter_exponent"
@@ -107,7 +109,7 @@ FLOW_DEFAULTS = {
     CONF_HP_LEARN_DAYS: 7,
 }
 FLOW_ENTITY_KEYS = (CONF_HP_FLOW, CONF_HP_RETURN, CONF_HP_FLOW_RATE, CONF_HP_HEAT,
-                    CONF_HP_POWER, CONF_HP_ROOM, CONF_HP_OUTDOOR)
+                    CONF_HP_POWER, CONF_HP_ROOM, CONF_HP_OUTDOOR, CONF_HP_FLOW_TARGET)
 FLOW_KEYS = set(FLOW_DEFAULTS) | set(FLOW_ENTITY_KEYS)
 
 # What the room kept free for the solar peak is sized on: "expected" (median

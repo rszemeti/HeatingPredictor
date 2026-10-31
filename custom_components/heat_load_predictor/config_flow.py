@@ -39,6 +39,7 @@ from .const import (
     CONF_HP_HEAT,
     CONF_HP_LEARN_DAYS,
     CONF_HP_OUTDOOR,
+    CONF_HP_FLOW_TARGET,
     CONF_HP_POWER,
     CONF_HP_RETURN,
     CONF_HP_ROOM,
@@ -315,6 +316,7 @@ def _flow_schema(current: dict[str, Any]) -> vol.Schema:
         (CONF_HP_POWER, {"domain": "sensor", "device_class": "power"}),
         (CONF_HP_ROOM, {"domain": "sensor", "device_class": "temperature"}),
         (CONF_HP_OUTDOOR, {"domain": "sensor", "device_class": "temperature"}),
+        (CONF_HP_FLOW_TARGET, {"domain": "number"}),
     ):
         k, v = _optional_entity(key, current, **cfg)
         fields[k] = v

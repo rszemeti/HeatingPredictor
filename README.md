@@ -213,7 +213,7 @@ The planner works in UTC throughout, so clock changes don't move anything. Times
 
 For other inverters, read the same `slots` attribute and write the equivalent settings.
 
-## Flow temperature planning (advisory)
+## Flow temperature planning and control
 
 Under **Configure → Flow temperature planning**, point the integration at your heat pump's own readings (flow, return, flow rate, heat out, electricity in, room and outdoor temperatures). It then:
 
@@ -226,7 +226,19 @@ Under **Configure → Flow temperature planning**, point the integration at your
 
 `sensor.heat_pump_flow_target` holds the flow temperature for now. Its attributes have the per-period plan (with learned COP and electricity where available), what's been learned and where each figure comes from, the steady-state water law at your target temperature, and the lowest outdoor temperature your highest flow temperature can hold the target at. The card shows each period's planned flow temperature when you hover a bar.
 
-Nothing is written to the heat pump. Compare the plan with what the pump does for a few days before acting on it.
+### Flow control (off by default)
+
+Nothing is written to the heat pump until you turn on **Flow control** (`switch.heat_pump_flow_control`) and set **Heat pump flow target** in Flow temperature planning: the number entity that sets the flow temperature (for an ESPHome Samsung controller, `number.…_heat_pump_flow_target`). The heat pump must be on a fixed flow temperature, with its own water law off, for the target to take effect.
+
+While it's on, every run (every 15 minutes):
+
+- The flow planned for the current period is written, within your lowest and highest flow temperatures and the entity's own limits, to the entity's step.
+- When the plan has the heat pump idle, the lowest flow is written, so it stops on its own.
+- It writes only when the plan differs from the current target by at least 0.5 °C, and at most once per run.
+- It writes nothing if the target entity is unavailable or there's no room temperature reading (the correction depends on it). The pump keeps its last target.
+- Turning it off writes back the flow target the pump had when you turned it on.
+
+The switch's `status` attribute (and the flow sensor's `control` attribute) says what it last did and why.
 
 ## How the model works
 
