@@ -244,6 +244,8 @@ class HeatLoadScheduleCard extends HTMLElement {
         .soc { fill: none; stroke: var(--success-color, #43a047); stroke-width: 2; }
         .flow { fill: none; stroke: #e53935; stroke-width: 2; opacity: .85; }
         .flowlbl { fill: #e53935; font-size: 10px; }
+        .tout { fill: none; stroke: #1e88e5; stroke-width: 1.5; opacity: .8; }
+        .outax text { fill: #1e88e5; font-size: 11px; }
         .flowidle { fill: var(--secondary-text-color); opacity: .08; }
         .socax text { fill: var(--success-color, #43a047); font-size: 11px; }
         .now { stroke: var(--error-color, #db4437); stroke-width: 1.5; opacity: .7; }
@@ -421,11 +423,14 @@ class HeatLoadScheduleCard extends HTMLElement {
 
     // planned flow temperature: its own strip under the time labels
     const hasFlow = this._config.show_flow && rows.some((r) => r.flow != null);
-    const FT = M.t + PH + 46, FH = 64;
-    this._svg.setAttribute("viewBox", `0 0 ${W} ${hasFlow ? FT + FH + 8 : H}`);
-    if (hasFlow) {
+    const outs = rows.filter((r) => r.t_out != null && isFinite(Number(r.t_out)));
+    const hasStrip = this._config.show_flow && (hasFlow || outs.length > 1);
+    const FT = M.t + PH + 46, FH = 80;
+    this._svg.setAttribute("viewBox", `0 0 ${W} ${hasStrip ? FT + FH + 8 : H}`);
+    if (hasStrip) {
       const per = this._guessPeriod();
       const fs = rows.filter((r) => r.flow != null).map((r) => r.flow);
+      if (!fs.length) fs.push(30, 40);
       let flo = Math.floor((Math.min(...fs) - 1) / 5) * 5, fhi = Math.ceil((Math.max(...fs) + 1) / 5) * 5;
       if (this._config.flow_y_min != null) flo = Math.min(flo, this._config.flow_y_min);
       if (this._config.flow_y_max != null) fhi = Math.max(fhi, this._config.flow_y_max);
@@ -436,10 +441,23 @@ class HeatLoadScheduleCard extends HTMLElement {
       for (let t = flo; t <= fhi; t += step) parts.push(`<line x1="${M.l}" x2="${M.l + PW}" y1="${fy(t)}" y2="${fy(t)}"/>`);
       parts.push(`</g><g class="axis">`);
       for (let t = flo; t <= fhi; t += step) parts.push(`<text x="${M.l - 6}" y="${fy(t) + 4}" text-anchor="end">${t}°</text>`);
-      parts.push(`<text x="${M.l}" y="${FT - 5}" class="flowlbl" style="font-size:11px">Planned flow °C</text></g>`);
+      parts.push(`<text x="${M.l}" y="${FT - 5}" class="flowlbl" style="font-size:11px">${hasFlow ? "Planned flow °C" : ""}</text></g>`);
+      // forecast outdoor temperature, own scale on the right
+      if (outs.length > 1) {
+        const ov = outs.map((r) => Number(r.t_out));
+        let olo = Math.floor(Math.min(...ov) - 1), ohi = Math.ceil(Math.max(...ov) + 1);
+        if (ohi - olo < 6) { const m = (olo + ohi) / 2; olo = Math.floor(m - 3); ohi = olo + 6; }
+        const oy = (t) => FT + FH * (1 - (t - olo) / (ohi - olo));
+        const ostep = ohi - olo > 12 ? 5 : 2;
+        parts.push(`<g class="outax">`);
+        for (let t = Math.ceil(olo / ostep) * ostep; t <= ohi; t += ostep) parts.push(`<text x="${M.l + PW + 6}" y="${oy(t) + 4}">${t}°</text>`);
+        parts.push(`<text x="${M.l + PW}" y="${FT - 5}" text-anchor="end">Outdoor °C</text></g>`);
+        const pts = outs.map((r) => `${this._x(Math.min(1440, toMin(r.start.slice(11, 16)) + per / 2))},${oy(Number(r.t_out))}`);
+        parts.push(`<polyline class="tout" pointer-events="none" points="${pts.join(" ")}"/>`);
+      }
       let seg = [], prev = null;
       const flush = () => { if (seg.length > 1) parts.push(`<polyline class="flow" pointer-events="none" points="${seg.join(" ")}"/>`); seg = []; };
-      for (const row of rows) {
+      for (const row of hasFlow ? rows : []) {
         const s = toMin(row.start.slice(11, 16)), e = Math.min(1440, s + per);
         if (row.flow == null) { flush(); prev = null; continue; }
         seg.push(`${this._x(s)},${fy(row.flow)}`, `${this._x(e)},${fy(row.flow)}`);
@@ -450,7 +468,7 @@ class HeatLoadScheduleCard extends HTMLElement {
       }
       flush();
       // idle periods shaded
-      for (const row of rows) {
+      for (const row of hasFlow ? rows : []) {
         if (row.flow != null) continue;
         const s = toMin(row.start.slice(11, 16)), e = Math.min(1440, s + per);
         parts.push(`<rect class="flowidle" pointer-events="none" x="${this._x(s)}" y="${FT}" width="${Math.max(1, this._x(e) - this._x(s))}" height="${FH}"/>`);
@@ -536,14 +554,15 @@ class HeatLoadScheduleCard extends HTMLElement {
       el.addEventListener("mouseleave", () => (this._tip.style.display = "none"));
     });
     const lb = this.shadowRoot.querySelector(".legend-batt");
-    const flowLegend = hasFlow ? `<span><span class="sw" style="border-top:2px solid #e53935"></span>Planned flow (grey: idle)</span>` : "";
+    const flowLegend = (hasFlow ? `<span><span class="sw" style="border-top:2px solid #e53935"></span>Planned flow (grey: idle)</span>` : "")
+      + (hasStrip && outs.length > 1 ? `<span><span class="sw" style="border-top:2px solid #1e88e5"></span>Outdoor forecast</span>` : "");
     lb.innerHTML = flowLegend + (bat ? `<span><span class="sw" style="border-top:2px solid var(--success-color,#43a047)"></span>Battery SOC</span>
       <span><span class="sw" style="height:10px;background:var(--success-color,#43a047);opacity:.25"></span>Charge window</span>
       <span><span class="sw" style="height:10px;background:#ff8f00;opacity:.25"></span>Discharge window</span>
       ${this._config.show_solar && (bat.solar || []).length ? `<span><span class="sw" style="height:10px;background:#f4c430;opacity:.45"></span>Solar (own scale)</span>` : ""}
       ${(bat.mode_runs || []).length ? `<span><span class="sw" style="height:6px;background:#1e88e5"></span>Feed-in priority</span>
       <span><span class="sw" style="height:6px;background:var(--secondary-text-color);opacity:.3"></span>Self-Use</span>` : ""}` : "");
-    lb.style.display = bat || hasFlow ? "contents" : "none";
+    lb.style.display = bat || hasStrip ? "contents" : "none";
   }
 
   _guessPeriod() {

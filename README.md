@@ -47,7 +47,7 @@ title: Heating schedule
 # y_max: 24
 # show_battery: true  # battery windows and projected SOC (needs the battery planner)
 # show_solar: true    # solar forecast bars, on their own scale
-# show_flow: true     # planned flow temperature, in its own strip under the chart
+# show_flow: true     # planned flow and forecast outdoor temperature, in a strip under the chart
 ```
 
 - **Edit points:** drag a point to move it, click empty space to add one, and double-click (or right-click) a point to delete it. The table under the chart gives exact times and temperatures.
