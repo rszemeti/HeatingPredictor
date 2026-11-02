@@ -737,6 +737,221 @@ class HeatLoadScheduleCard extends HTMLElement {
   }
 }
 
+
+/*
+ * Heat Load Flow Plan Card: the next hours of the flow temperature plan.
+ *
+ *   type: custom:heat-load-flow-card
+ *   hours: 24            # how far ahead
+ *   entry_id / title     # optional
+ *
+ * Top: the planned flow temperature (grey where the heat pump idles).
+ * Bottom: forecast outdoor temperature, modelled room and the target.
+ */
+class HeatLoadFlowCard extends HTMLElement {
+  setConfig(config) {
+    this._config = { hours: 24, ...config };
+    if (!this.shadowRoot) this._build();
+  }
+  static getStubConfig() { return { hours: 24 }; }
+  getCardSize() { return 6; }
+  getGridOptions() { return { columns: 12, min_columns: 6, rows: "auto" }; }
+
+  set hass(hass) {
+    const first = !this._hass;
+    this._hass = hass;
+    if (first) this._load();
+  }
+  disconnectedCallback() { clearInterval(this._timer); this._timer = null; }
+  connectedCallback() { if (this._hass && !this._timer) this._timer = setInterval(() => this._load(), 5 * 60 * 1000); }
+
+  async _load() {
+    try {
+      const msg = { type: `${DOMAIN}/forecast` };
+      if (this._config.entry_id) msg.entry_id = this._config.entry_id;
+      const f = await this._hass.callWS(msg);
+      this._rows = f.periods || [];
+      this._err = null;
+    } catch (e) {
+      this._rows = [];
+      this._err = e.message || "Heat Load Predictor isn't set up";
+    }
+    if (!this._timer) this._timer = setInterval(() => this._load(), 5 * 60 * 1000);
+    this._render();
+  }
+
+  _build() {
+    const root = this.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <style>
+        :host { display: block; }
+        ha-card { padding: 16px; }
+        .title { font-size: 1.2em; font-weight: 500; color: var(--primary-text-color); margin-bottom: 4px; }
+        .sum { color: var(--primary-text-color); font-size: .95em; margin-bottom: 8px; }
+        .sum b { font-weight: 600; }
+        .wrap { position: relative; }
+        svg { width: 100%; height: auto; display: block; touch-action: pan-y; }
+        .grid line { stroke: var(--divider-color, #ddd); stroke-width: 1; }
+        .axis text { fill: var(--secondary-text-color, #666); font-size: 11px; }
+        .day text { fill: var(--primary-text-color); font-size: 11px; font-weight: 500; }
+        .flow { fill: none; stroke: #e53935; stroke-width: 2.2; }
+        .flowlbl { fill: #e53935; font-size: 10px; }
+        .idle { fill: var(--secondary-text-color); opacity: .09; }
+        .out { fill: none; stroke: #1e88e5; stroke-width: 1.8; }
+        .tin { fill: none; stroke: var(--primary-text-color, #212121); stroke-width: 1.5; stroke-dasharray: 4 4; opacity: .7; }
+        .tgt { fill: none; stroke: #8e24aa; stroke-width: 2; opacity: .8; }
+        .lbl { font-size: 11px; }
+        .cur { stroke: var(--secondary-text-color); stroke-width: 1; stroke-dasharray: 2 3; }
+        .hit { fill: transparent; }
+        .tip { position: absolute; pointer-events: none; background: var(--card-background-color, #fff); color: var(--primary-text-color);
+               border: 1px solid var(--divider-color); border-radius: 6px; padding: 4px 8px; font-size: .8em; white-space: nowrap; display: none;
+               box-shadow: 0 2px 6px rgba(0,0,0,.15); }
+        .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: .85em; color: var(--secondary-text-color); margin-top: 6px; }
+        .sw { display: inline-block; width: 18px; height: 0; vertical-align: middle; margin-right: 5px; }
+        .err { color: var(--error-color, #db4437); }
+      </style>
+      <ha-card>
+        <div class="title"></div>
+        <div class="sum"></div>
+        <div class="wrap"><svg></svg><div class="tip"></div></div>
+        <div class="legend">
+          <span><span class="sw" style="border-top:2px solid #e53935"></span>Planned flow (grey: idle)</span>
+          <span><span class="sw" style="border-top:2px solid #1e88e5"></span>Outdoor forecast</span>
+          <span><span class="sw" style="border-top:2px dashed var(--primary-text-color,#212121)"></span>Modelled room</span>
+          <span><span class="sw" style="border-top:2px solid #8e24aa"></span>Target</span>
+        </div>
+      </ha-card>`;
+    this._svg = root.querySelector("svg");
+    this._tip = root.querySelector(".tip");
+    this._svg.addEventListener("mouseleave", () => (this._tip.style.display = "none"));
+  }
+
+  _fmt(ms, opts) {
+    const tz = this._hass?.config?.time_zone;
+    try { return new Intl.DateTimeFormat(undefined, { ...opts, timeZone: tz }).format(new Date(ms)); }
+    catch (e) { return new Intl.DateTimeFormat(undefined, opts).format(new Date(ms)); }
+  }
+  _hm(ms) { return this._fmt(ms, { hour: "2-digit", minute: "2-digit", hour12: false }); }
+
+  _render() {
+    if (!this.shadowRoot) return;
+    const r = this.shadowRoot;
+    r.querySelector(".title").textContent = this._config.title || "Flow temperature plan";
+    if (this._err) { r.querySelector(".sum").innerHTML = `<span class="err">${esc(this._err)}</span>`; return; }
+    const all = (this._rows || []).map((p) => ({ ...p, t: Date.parse(p.start) }));
+    if (all.length < 2) { r.querySelector(".sum").textContent = "No forecast yet."; return; }
+    const per = all[1].t - all[0].t;
+    const t0 = all[0].t, t1 = t0 + this._config.hours * 3600000;
+    const rows = all.filter((p) => p.t < t1);
+    const hasFlow = rows.some((p) => "flow" in p);
+
+    // summary
+    const now = rows[0];
+    let sum = hasFlow ? `Now: <b>${now.flow == null ? "idle" : now.flow + " °C"}</b>` : "Flow planning isn't set up.";
+    if (hasFlow) {
+      const next = rows.find((p) => p.flow !== now.flow);
+      if (next) sum += ` · next change ${this._hm(next.t)} → <b>${next.flow == null ? "idle" : next.flow + " °C"}</b>`;
+      const fs = rows.filter((p) => p.flow != null).map((p) => p.flow);
+      if (fs.length) sum += ` · range ${Math.min(...fs)}–${Math.max(...fs)} °C`;
+      const idleH = rows.filter((p) => p.flow == null).length * per / 3600000;
+      if (idleH) sum += ` · idle ${idleH.toFixed(1)} h`;
+    }
+    r.querySelector(".sum").innerHTML = sum;
+
+    const W = 760, L = 44, R = 44, PW = W - L - R;
+    const P1 = { t: 14, h: 120 }, P2 = { t: 160, h: 120 }, H = P2.t + P2.h + 34;
+    this._svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    const x = (t) => L + ((t - t0) / (t1 - t0)) * PW;
+    const parts = [];
+
+    // scales
+    const fs = rows.filter((p) => p.flow != null).map((p) => p.flow);
+    let flo = fs.length ? Math.floor((Math.min(...fs) - 1) / 5) * 5 : 25;
+    let fhi = fs.length ? Math.ceil((Math.max(...fs) + 1) / 5) * 5 : 45;
+    if (fhi - flo < 10) fhi = flo + 10;
+    const fy = (v) => P1.t + P1.h * (1 - (v - flo) / (fhi - flo));
+    const temps = [];
+    for (const p of rows) for (const k of ["t_out", "t_in", "t_target"]) if (p[k] != null && isFinite(Number(p[k]))) temps.push(Number(p[k]));
+    let tlo = Math.floor(Math.min(...temps) - 1), thi = Math.ceil(Math.max(...temps) + 1);
+    const ty = (v) => P2.t + P2.h * (1 - (v - tlo) / (thi - tlo));
+
+    // grids, hour ticks every 3 h on local hours
+    parts.push(`<g class="grid">`);
+    const ticks = [];
+    for (let t = Math.ceil(t0 / 3600000) * 3600000; t <= t1; t += 3600000) {
+      const h = Number(this._fmt(t, { hour: "numeric", hour12: false })) % 24;
+      if (h % 3 === 0) ticks.push([t, h]);
+    }
+    for (const [t] of ticks) for (const P of [P1, P2]) parts.push(`<line x1="${x(t)}" x2="${x(t)}" y1="${P.t}" y2="${P.t + P.h}"/>`);
+    const fstep = fhi - flo > 20 ? 10 : 5;
+    for (let v = flo; v <= fhi; v += fstep) parts.push(`<line x1="${L}" x2="${L + PW}" y1="${fy(v)}" y2="${fy(v)}"/>`);
+    const tstep = thi - tlo > 16 ? 5 : thi - tlo > 8 ? 2 : 1;
+    for (let v = Math.ceil(tlo / tstep) * tstep; v <= thi; v += tstep) parts.push(`<line x1="${L}" x2="${L + PW}" y1="${ty(v)}" y2="${ty(v)}"/>`);
+    parts.push(`</g><g class="axis">`);
+    for (let v = flo; v <= fhi; v += fstep) parts.push(`<text x="${L - 6}" y="${fy(v) + 4}" text-anchor="end">${v}°</text>`);
+    for (let v = Math.ceil(tlo / tstep) * tstep; v <= thi; v += tstep) parts.push(`<text x="${L - 6}" y="${ty(v) + 4}" text-anchor="end">${v}°</text>`);
+    for (const [t, h] of ticks) parts.push(`<text x="${x(t)}" y="${P2.t + P2.h + 16}" text-anchor="middle">${String(h).padStart(2, "0")}:00</text>`);
+    parts.push(`<text x="${L}" y="${P1.t - 3}" class="lbl" style="fill:#e53935">Flow °C</text>`);
+    parts.push(`<text x="${L}" y="${P2.t - 3}" class="lbl">Outdoor / room °C</text></g><g class="day">`);
+    for (const [t, h] of ticks) if (h === 0) parts.push(`<text x="${x(t)}" y="${P2.t + P2.h + 30}" text-anchor="middle">${esc(this._fmt(t, { weekday: "short", day: "numeric" }))}</text>`);
+    parts.push(`</g>`);
+
+    // flow: stepped, gaps where idle (shaded)
+    let seg = [], prev = null;
+    const flush = () => { if (seg.length > 1) parts.push(`<polyline class="flow" points="${seg.join(" ")}"/>`); seg = []; };
+    for (const p of rows) {
+      const a = x(p.t), b = x(Math.min(t1, p.t + per));
+      if (p.flow == null) {
+        flush(); prev = null;
+        if (hasFlow) parts.push(`<rect class="idle" x="${a}" y="${P1.t}" width="${Math.max(1, b - a)}" height="${P1.h}"/>`);
+        continue;
+      }
+      seg.push(`${a},${fy(p.flow)}`, `${b},${fy(p.flow)}`);
+      if (prev === null || Math.abs(p.flow - prev) >= 1.5) {
+        parts.push(`<text class="flowlbl" x="${a + 2}" y="${fy(p.flow) - 4}">${p.flow}</text>`);
+        prev = p.flow;
+      }
+    }
+    flush();
+
+    // outdoor, modelled room (at period ends), target (stepped)
+    const line = (cls, pts) => pts.length > 1 && parts.push(`<polyline class="${cls}" points="${pts.join(" ")}"/>`);
+    line("out", rows.filter((p) => p.t_out != null).map((p) => `${x(p.t + per / 2)},${ty(Number(p.t_out))}`));
+    line("tin", rows.filter((p) => p.t_in != null).map((p) => `${x(Math.min(t1, p.t + per))},${ty(Number(p.t_in))}`));
+    const tg = [];
+    for (const p of rows) if (p.t_target != null) tg.push(`${x(p.t)},${ty(Number(p.t_target))}`, `${x(Math.min(t1, p.t + per))},${ty(Number(p.t_target))}`);
+    line("tgt", tg);
+
+    // hover
+    const cursor = `<line class="cur" x1="0" x2="0" y1="${P1.t}" y2="${P2.t + P2.h}" visibility="hidden"/>`;
+    parts.push(cursor);
+    rows.forEach((p, i) => {
+      const a = x(p.t), b = x(Math.min(t1, p.t + per));
+      parts.push(`<rect class="hit" data-i="${i}" x="${a}" y="${P1.t}" width="${Math.max(1, b - a)}" height="${P2.t + P2.h - P1.t}"/>`);
+    });
+    this._svg.innerHTML = parts.join("");
+    const cur = this._svg.querySelector(".cur");
+    this._svg.querySelectorAll(".hit").forEach((el) => {
+      el.addEventListener("mousemove", (e) => {
+        const p = rows[Number(el.dataset.i)];
+        const cx = x(p.t + per / 2);
+        cur.setAttribute("x1", cx); cur.setAttribute("x2", cx); cur.setAttribute("visibility", "visible");
+        const f = p.flow == null ? "idle" : `${p.flow} °C`;
+        this._tip.innerHTML = `<b>${this._hm(p.t)}–${this._hm(p.t + per)}</b><br>Flow <b>${f}</b>`
+          + (p.heat_kw != null ? ` · heat ${p.heat_kw} kW` : "")
+          + `<br>Outdoor ${p.t_out} °C · room ${p.t_in} °C (target ${p.t_target} °C)`
+          + (p.cop != null ? `<br>COP ${p.cop}` : "");
+        const box = r.querySelector(".wrap").getBoundingClientRect();
+        this._tip.style.display = "block";
+        const tx = e.clientX - box.left + 12;
+        this._tip.style.left = `${Math.max(0, Math.min(tx, box.width - this._tip.offsetWidth - 4))}px`;
+        this._tip.style.top = `${e.clientY - box.top + 12}px`;
+      });
+    });
+    this._svg.addEventListener("mouseleave", () => cur.setAttribute("visibility", "hidden"));
+  }
+}
+
 // Home Assistant's app script installs a scoped custom element registry
 // polyfill that replaces window.customElements with a new registry. This file
 // is injected alongside the app script and can finish loading first; a card
@@ -747,6 +962,7 @@ class HeatLoadScheduleCard extends HTMLElement {
 const CARD_TAG = "heat-load-schedule-card";
 function registerCard() {
   if (!window.customElements.get(CARD_TAG)) window.customElements.define(CARD_TAG, HeatLoadScheduleCard);
+  if (!window.customElements.get("heat-load-flow-card")) window.customElements.define("heat-load-flow-card", HeatLoadFlowCard);
 }
 if (window.customElements.get("home-assistant") || !document.querySelector("home-assistant")) {
   registerCard();
@@ -759,4 +975,9 @@ window.customCards.push({
   type: "heat-load-schedule-card",
   name: "Heat Load Schedule",
   description: "Edit the Heat Load Predictor's target temperature curve and see forecast heating electricity.",
+});
+window.customCards.push({
+  type: "heat-load-flow-card",
+  name: "Heat Load Flow Plan",
+  description: "The next hours of the planned flow temperature, with the outdoor forecast, modelled room and target.",
 });

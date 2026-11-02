@@ -226,6 +226,15 @@ Under **Configure → Flow temperature planning**, point the integration at your
 
 `sensor.heat_pump_flow_target` holds the flow temperature for now. Its attributes have the per-period plan (with learned COP and electricity where available), what's been learned and where each figure comes from, the steady-state water law at your target temperature, and the lowest outdoor temperature your highest flow temperature can hold the target at. The card shows each period's planned flow temperature when you hover a bar.
 
+### Flow plan card
+
+```yaml
+type: custom:heat-load-flow-card
+hours: 24          # how far ahead
+```
+
+The next hours of the plan: the flow temperature (grey where the heat pump idles) above, and the forecast outdoor temperature, modelled room and target below. Hover for each half-hour's flow, heat, temperatures and COP. The line above the chart gives the flow now, the next change, the range and the idle time.
+
 ### Flow control (off by default)
 
 Nothing is written to the heat pump until you turn on **Flow control** (`switch.heat_pump_flow_control`) and set **Heat pump flow target** in Flow temperature planning: the number entity that sets the flow temperature (for an ESPHome Samsung controller, `number.…_heat_pump_flow_target`). The heat pump must be on a fixed flow temperature, with its own water law off, for the target to take effect.

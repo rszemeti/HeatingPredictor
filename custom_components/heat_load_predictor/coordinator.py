@@ -378,6 +378,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         plan = []
         for r, f, row in zip(results, flows, data["periods"]):
             row["flow"] = f
+            row["heat_kw"] = round(r.heat_kw, 2)
             item = {"start": dt_util.as_local(r.start).isoformat(), "flow": f,
                     "heat_kw": round(r.heat_kw, 2)}
             if cop_model and f is not None:
