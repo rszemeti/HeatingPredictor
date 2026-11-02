@@ -521,6 +521,8 @@ async def test_flow_control_switch(hass: HomeAssistant, fake_weather, freezer) -
     assert not calls
     # Not controlling: the correction doesn't build up (2 Nov: +3 °C while off).
     assert coord.data["flow"]["correction"] == 0
+    # The room reading the planner uses is shown (2 Nov: the card showed another sensor).
+    assert coord.data["flow"]["room"] == 18.0 and coord.data["flow"]["room_entity"] == "sensor.hp_room"
     hass.states.async_set("sensor.hp_room", "21.5", {"unit_of_measurement": "°C"})
 
     await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.heat_pump_flow_control"}, blocking=True)
