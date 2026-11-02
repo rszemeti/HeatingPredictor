@@ -305,10 +305,15 @@ def _lsq(rows: list[tuple[float, ...]]) -> tuple[float, ...] | None:
 
 
 def fit_house(samples: dict, s_fallback: float | None = None, min_hours: float = 24.0,
-              step_s: float = 1800) -> HouseFit | None:
-    """Fit the house from history. If the three-way fit isn't physically
-    sensible (too little variety, e.g. a fixed flow for days), keep the slope
-    from the settings (`s_fallback`) and learn only the offset and warm-up."""
+              step_s: float = 1800, band: tuple[float, float] = (0.67, 1.5)) -> HouseFit | None:
+    """Fit the house from history.
+
+    The slope is the weak part: with the flow nearly fixed for days, the room
+    reading's own wobble sits on both sides of the equation and drags the
+    slope towards zero. So the free fit is used only if its slope is within
+    `band` (a factor) of `s_fallback`, the slope from the radiator and heat
+    loss figures (learned from the heat meter, or the settings). Otherwise
+    that slope is kept and only the level and warm-up come from history."""
     pts = house_points(samples, step_s)
     hours = len(pts) * step_s / 3600
     if hours < min_hours:
@@ -321,7 +326,8 @@ def fit_house(samples: dict, s_fallback: float | None = None, min_hours: float =
     if sol is not None:
         s, i, tau = sol
         # Physically sensible, and not wildly off typical houses.
-        if 0.1 <= s <= 4.0 and 0 <= tau <= 48 and -15 <= i <= 15:
+        in_band = s_fallback is None or band[0] * s_fallback <= s <= band[1] * s_fallback
+        if 0.1 <= s <= 4.0 and 0 <= tau <= 48 and -15 <= i <= 15 and in_band:
             return HouseFit(s, i, tau, hours, rmse(s, i, tau), "fit")
     if s_fallback is None:
         return None

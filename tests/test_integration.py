@@ -513,8 +513,15 @@ async def test_flow_control_switch(hass: HomeAssistant, fake_weather, freezer) -
     sw = hass.states.get("switch.heat_pump_flow_control")
     assert sw is not None and sw.state == "off", [s.entity_id for s in hass.states.async_all("switch")]
     coord = entry.runtime_data
+    hass.states.async_set("sensor.hp_room", "18.0", {"unit_of_measurement": "°C"})
+    freezer.tick(timedelta(minutes=30))
+    await coord.async_refresh()
+    freezer.tick(timedelta(minutes=30))
     await coord.async_refresh()
     assert not calls
+    # Not controlling: the correction doesn't build up (2 Nov: +3 °C while off).
+    assert coord.data["flow"]["correction"] == 0
+    hass.states.async_set("sensor.hp_room", "21.5", {"unit_of_measurement": "°C"})
 
     await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.heat_pump_flow_control"}, blocking=True)
     await hass.async_block_till_done()

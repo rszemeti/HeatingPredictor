@@ -141,6 +141,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._flow_written: float | None = None
         self._flow_written_at: datetime | None = None
         self._flow_control_status = "off"
+        self._flow_following = False   # the pump is on the plan (for the correction)
         self._flow_corr_at: datetime | None = None
         self._warned_gas: set[str] = set()
 
@@ -344,9 +345,15 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Live correction: a slow integral of (target - room). The forecast
         # already starts from the measured room temperature; this only takes
         # out a steady bias (radiators or heat loss a bit off).
+        # Only while the heat pump is following the plan (Flow control on and
+        # writing), and only when the plan expects to be at the target now (not
+        # during a scheduled warm-up or cool-down); otherwise it means nothing.
         room = self._num(o.get(CONF_HP_ROOM), "°C") or self._indoor_temp()
         now_utc = dt_util.utcnow()
-        if room is not None and self._flow_corr_at is not None:
+        settled = bool(results) and abs(results[0].t_in_start - target(now_utc)) < 0.3
+        if not self._flow_following:
+            self._flow_correction = 0.0
+        elif room is not None and self._flow_corr_at is not None and settled:
             dt_h = min(1.0, (now_utc - self._flow_corr_at).total_seconds() / 3600)
             err = target(now_utc) - room
             self._flow_correction = max(-5.0, min(5.0, self._flow_correction + 0.5 * err * dt_h))
@@ -444,6 +451,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Only when it has changed by at least a step, at most once per run,
         and only with a live room reading (the correction depends on it)."""
         flow["control"] = self._flow_control_info()
+        self._flow_following = False
         if not self.flow_control:
             self._flow_control_status = "off"
             flow["control"] = self._flow_control_info()
@@ -476,11 +484,14 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         now = dt_util.utcnow()
         if cur is not None and abs(want - cur) < max(step, 0.5) - 1e-6:
             self._flow_control_status = f"holding {cur:g} °C (plan {want:g} °C)"
+            self._flow_following = True
         elif self._flow_written_at and now - self._flow_written_at < timedelta(minutes=FLOW_WRITE_MIN_MINUTES):
             self._flow_control_status = f"waiting to write {want:g} °C (wrote recently)"
+            self._flow_following = True
         else:
             try:
                 await self._async_write_flow(eid, want)
+                self._flow_following = True
                 self._flow_control_status = f"wrote {want:g} °C" + (" (idle)" if flow["now"] is None else "")
             except Exception as err:  # noqa: BLE001 - never let control break the forecast
                 self._flow_control_status = f"write failed: {err}"
@@ -584,22 +595,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 flow=flow, ret=g("ret") if g("ret") is not None else nan, room=room, out=out,
             )
 
-        # The flow curve straight from history (flow, room, outdoor).
-        h0 = float(o.get(CONF_HEAT_LOSS, 200))
-        gains = float(o.get(CONF_GAINS, 400)) / 1000
-        outs = [s.out for s in samples.values()]
-        s_settings = flowlaw.model_slope(
-            h0, gains, 21.0, float(o[CONF_EMITTER_K]), float(o[CONF_EMITTER_N]),
-            float(o[CONF_FLOW_LPM]), sum(outs) / len(outs) if outs else 5.0)
-        self._flow_house = flowlaw.fit_house(samples, s_settings)
-        hours = len(samples) / 2
-        if self._flow_house:
-            self._flow_status = (f"learned from {self._flow_house.hours:.0f} h of history"
-                                 + (" (slope from the settings: not enough variety yet)"
-                                    if self._flow_house.mode == "anchored" else ""))
-        else:
-            self._flow_status = f"only {hours:.0f} h of usable history so far; needs about a day"
-
+        all_samples = samples
         samples = {t: s for t, s in samples.items()
                    if flowlaw.is_finite(s.heat_kw, s.ret)}
         learned = flowlaw.Learned()
@@ -619,6 +615,27 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cop = flowlaw.fit_cop(with_out.values())
                 if cop:
                     learned.cop, learned.cop_samples = cop
+
+        # The flow curve from history (flow, room, outdoor): the level from
+        # history; the slope too if it agrees with the radiator and heat loss
+        # figures (learned from the heat meter where possible).
+        samples = all_samples
+        h_ref = learned.heat_loss_w_per_k or float(o.get(CONF_HEAT_LOSS, 200))
+        k_ref = learned.k or float(o[CONF_EMITTER_K])
+        ref_from = "the heat meter" if learned.k and learned.heat_loss_w_per_k else "the settings"
+        gains = float(o.get(CONF_GAINS, 400)) / 1000
+        outs = [s.out for s in samples.values()]
+        s_ref = flowlaw.model_slope(
+            h_ref, gains, 21.0, k_ref, float(o[CONF_EMITTER_N]),
+            float(o[CONF_FLOW_LPM]), sum(outs) / len(outs) if outs else 5.0)
+        self._flow_house = flowlaw.fit_house(samples, s_ref)
+        hours = len(samples) / 2
+        if self._flow_house:
+            self._flow_status = (f"learned from {self._flow_house.hours:.0f} h of history"
+                                 + (f" (slope from {ref_from}, level from history)"
+                                    if self._flow_house.mode == "anchored" else ""))
+        else:
+            self._flow_status = f"only {hours:.0f} h of usable history so far; needs about a day"
         return learned
 
     def _carried_tin(self, when: datetime) -> float | None:

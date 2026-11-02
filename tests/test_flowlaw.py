@@ -129,7 +129,7 @@ def test_house_fit_from_a_fixed_flow():
     """Fixed 32 °C flow holding ~22 °C: the learned law gives about 32 °C at
     the conditions it ran in, and less for a lower target."""
     s = _fixed_flow_house()
-    hf = fl.fit_house(s, s_fallback=1.2)
+    hf = fl.fit_house(s, s_fallback=1.0)
     assert hf is not None
     assert hf.mode == "fit" and hf.s == pytest.approx(0.08 / 0.1, rel=0.2), hf
     pts = list(s.values())
@@ -164,3 +164,23 @@ def test_house_fit_anchors_when_the_fit_is_nonsense():
 def test_house_fit_needs_a_day():
     s = dict(list(_fixed_flow_house(days=1).items())[:30])
     assert fl.fit_house(s, s_fallback=1.0) is None
+
+
+def test_coarse_room_sensor_keeps_the_heat_meter_slope():
+    """A room sensor in 0.5 °C steps with the flow fixed for days drags the
+    free slope towards zero (2 Nov: 0.19, "holds down to -107 °C"). The slope
+    then comes from the radiator / heat loss figures; the level from history."""
+    s = _fixed_flow_house(days=6)
+    for t, smp in s.items():
+        s[t] = fl.Sample(smp.heat_kw, smp.elec_kw, smp.flow, smp.ret, round(smp.room * 2) / 2, smp.out)
+    pts = fl.house_points(s)
+    free = fl._lsq([(x, 1.0, d, y) for x, d, y in pts])
+    hf = fl.fit_house(s, s_fallback=0.8)
+    print("free fit", free, "->", hf)
+    assert hf.mode == "anchored" and hf.s == 0.8
+    assert hf.holds_down_to(21, 55) > -40
+    pts_ = list(s.values())
+    room = sum(p.room for p in pts_) / len(pts_)
+    out = sum(p.out for p in pts_) / len(pts_)
+    mean_flow = sum(p.flow for p in pts_) / len(pts_)
+    assert hf.flow(room, out) == pytest.approx(mean_flow, abs=1.0)
