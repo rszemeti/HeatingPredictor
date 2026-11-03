@@ -74,4 +74,15 @@ async def test_learns_house_from_heat_pump_statistics(hass: HomeAssistant, fake_
     assert a["learn_status"].startswith("learned from"), a["learn_status"]
     law = {p["outdoor"]: p["flow"] for p in a["water_law"]}
     assert law[0] > law[10] > law[15]
+    # Daily COP from the same statistics.
+    cop = hass.states.get("sensor.heat_pump_cop_yesterday")
+    assert cop is not None and cop.state not in ("unknown", "unavailable"), cop
+    days = cop.attributes["days"]
+    assert 1 <= len(days) <= 7 and all(not d["today"] for d in days)
+    full = [d for d in days if d["hours"] == 24]
+    assert full, days
+    for d in full:
+        assert d["cop"] == pytest.approx(d["heat_kwh"] / d["elec_kwh"], rel=0.03)
+        assert 1.5 < d["cop"] < 6
+    assert float(cop.state) == days[-1]["cop"]
     assert not calls                                   # advisory: nothing written

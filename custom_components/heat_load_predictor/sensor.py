@@ -87,6 +87,7 @@ async def async_setup_entry(
             BatteryNextWriteSensor(coordinator),
         ]
     entities.append(FlowTargetSensor(coordinator))
+    entities.append(DailyCopSensor(coordinator))
     async_add_entities(entities)
 
 
@@ -248,3 +249,40 @@ class FlowTargetSensor(CoordinatorEntity[HeatLoadCoordinator], SensorEntity):
         if not f:
             return None
         return {k: v for k, v in f.items() if k != "now"}
+
+
+class DailyCopSensor(CoordinatorEntity[HeatLoadCoordinator], SensorEntity):
+    """Yesterday's COP (heat out / electricity in) from the heat pump's own
+    readings; the last 7 days and today so far in attributes."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "daily_cop"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 2
+    _attr_icon = "mdi:heat-pump-outline"
+
+    def __init__(self, coordinator: HeatLoadCoordinator) -> None:
+        super().__init__(coordinator)
+        entry = coordinator.config_entry
+        self._attr_unique_id = f"{entry.entry_id}_daily_cop"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)})
+
+    @property
+    def _days(self) -> list[dict]:
+        return (self.coordinator.data or {}).get("daily_cop") or []
+
+    @property
+    def native_value(self) -> float | None:
+        past = [d for d in self._days if not d["today"]]
+        return past[-1]["cop"] if past else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        days = self._days
+        if not days:
+            return None
+        today = next((d for d in days if d["today"]), None)
+        return {
+            "days": [d for d in days if not d["today"]][-7:],
+            "today": today,
+        }

@@ -226,6 +226,10 @@ Under **Configure → Flow temperature planning**, point the integration at your
 
 `sensor.heat_pump_flow_target` holds the flow temperature for now. Its attributes have the per-period plan (with learned COP and electricity where available), what's been learned and where each figure comes from, the steady-state water law at your target temperature, and the lowest outdoor temperature your highest flow temperature can hold the target at. The card shows each period's planned flow temperature when you hover a bar.
 
+### Daily COP
+
+With heat output and electricity in set, `sensor.heat_pump_cop_yesterday` gives yesterday's COP (heat out ÷ electricity in, from the hourly statistics), with the last 7 days (heat, electricity, COP, hours of data) and today so far in its attributes. Updated every 30 minutes.
+
 ### Flow plan card
 
 ```yaml

@@ -195,6 +195,9 @@
       },
       "flow_target": {
         "name": "Flow target"
+      },
+      "daily_cop": {
+        "name": "COP yesterday"
       }
     },
     "switch": {

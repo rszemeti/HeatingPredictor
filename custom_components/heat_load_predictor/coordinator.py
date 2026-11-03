@@ -135,6 +135,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._flow_house: flowlaw.HouseFit | None = None
         self._flow_status = "not run yet"
         self._flow_correction = 0.0
+        self._daily_cop: list[dict] = []
+        self._daily_cop_at: datetime | None = None
         # Flow control (the switch): off unless turned on.
         self.flow_control = False
         self.flow_restore_to: float | None = None
@@ -302,6 +304,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ]
         data = summarise(results, now_local, self.period, indoor is not None)
         await self._async_maybe_learn_flow()
+        await self._async_maybe_daily_cop()
+        data["daily_cop"] = self._daily_cop
         data["flow"] = self._plan_flow(results, data, now_local, target)
         await self._async_control_flow(data["flow"])
         if self.config_entry.options.get(CONF_BATTERY_ENABLED):
@@ -511,6 +515,57 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "last_written_at": self._flow_written_at.isoformat() if self._flow_written_at else None,
             "restore_to": self.flow_restore_to,
         }
+
+    async def _async_maybe_daily_cop(self) -> None:
+        """Heat out, electricity in and COP for each of the last 7 days and
+        today so far, from the heat pump's hourly statistics (mean kW over
+        an hour is that hour's kWh). Every 30 minutes."""
+        o = self.config_entry.options
+        heat_id, elec_id = o.get(CONF_HP_HEAT), o.get(CONF_HP_POWER)
+        if not (heat_id and elec_id) or "recorder" not in self.hass.config.components:
+            self._daily_cop = []
+            return
+        now = dt_util.utcnow()
+        if self._daily_cop_at and now - self._daily_cop_at < timedelta(minutes=30):
+            return
+        from homeassistant.components.recorder.statistics import statistics_during_period
+        from homeassistant.helpers.recorder import get_instance
+
+        start = dt_util.start_of_local_day() - timedelta(days=7)
+
+        def fetch() -> dict:
+            return statistics_during_period(
+                self.hass, dt_util.as_utc(start), None, {heat_id, elec_id}, "hour",
+                {"power": "kW"}, {"mean"})
+
+        try:
+            stats = await get_instance(self.hass).async_add_executor_job(fetch)
+        except Exception as err:  # noqa: BLE001 - never let this break the forecast
+            _LOGGER.warning("Couldn't read heat pump statistics for daily COP: %s", err)
+            return
+        days: dict[str, list[float]] = {}
+        for idx, eid in enumerate((heat_id, elec_id)):
+            for r in stats.get(eid, []):
+                if r.get("mean") is None:
+                    continue
+                d = dt_util.as_local(dt_util.utc_from_timestamp(r["start"])).date().isoformat()
+                days.setdefault(d, [0.0, 0.0, 0, 0])
+                days[d][idx] += max(0.0, r["mean"])
+                days[d][2 + idx] += 1
+        out = []
+        today = dt_util.now().date().isoformat()
+        for d in sorted(days):
+            heat, elec, nh, ne = days[d]
+            out.append({
+                "date": d,
+                "heat_kwh": round(heat, 1),
+                "elec_kwh": round(elec, 1),
+                "cop": round(heat / elec, 2) if elec >= 0.2 and nh and ne else None,
+                "hours": min(nh, ne),
+                "today": d == today,
+            })
+        self._daily_cop = out[-8:]
+        self._daily_cop_at = now
 
     async def _async_maybe_learn_flow(self) -> None:
         o = self.config_entry.options
