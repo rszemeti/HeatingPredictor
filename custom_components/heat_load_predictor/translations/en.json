@@ -198,6 +198,9 @@
       },
       "daily_cop": {
         "name": "COP yesterday"
+      },
+      "room_target": {
+        "name": "Room target"
       }
     },
     "switch": {

@@ -478,6 +478,9 @@ async def test_flow_options_and_other_pages_keep_them(hass: HomeAssistant, fake_
     assert entry.options["flow_max_c"] == 50
     st = hass.states.get("sensor.heat_pump_flow_target")
     assert st.attributes["emitter_k"] == 0.07 and st.attributes["emitter_k_from"] == "setting"
+    # The schedule's room target for now has its own sensor.
+    rt = hass.states.get("sensor.heat_pump_room_target")
+    assert rt is not None and float(rt.state) == st.attributes["target_now"]
     # Without the heat pump's sensors it says what's missing.
     assert st.attributes["curve_from"] == "settings"
     assert "flow temperature" in st.attributes["learn_status"]
@@ -521,6 +524,8 @@ async def test_flow_control_switch(hass: HomeAssistant, fake_weather, freezer) -
     assert not calls
     # Not controlling: the correction doesn't build up (2 Nov: +3 °C while off).
     assert coord.data["flow"]["correction"] == 0
+    rt = hass.states.get("sensor.heat_pump_room_target")
+    assert rt is not None and float(rt.state) == coord.data["flow"]["target_now"]
     # The room reading the planner uses is shown (2 Nov: the card showed another sensor).
     assert coord.data["flow"]["room"] == 18.0 and coord.data["flow"]["room_entity"] == "sensor.hp_room"
     hass.states.async_set("sensor.hp_room", "21.5", {"unit_of_measurement": "°C"})
