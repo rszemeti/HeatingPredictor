@@ -74,6 +74,15 @@ async def test_learns_house_from_heat_pump_statistics(hass: HomeAssistant, fake_
     assert a["learn_status"].startswith("learned from"), a["learn_status"]
     law = {p["outdoor"]: p["flow"] for p in a["water_law"]}
     assert law[0] > law[10] > law[15]
+    # "Download planning data" carries the flow plan and recent history.
+    from custom_components.heat_load_predictor.const import DOMAIN as _D
+    coord = hass.config_entries.async_entries(_D)[0].runtime_data
+    await async_wait_recording_done(hass)
+    fh = await coord.async_flow_history()
+    assert fh["step_minutes"] == 5 and len(fh["series"]["room"]) == 48 * 12
+    assert fh["entities"]["planned_flow"] == "sensor.heat_pump_flow_target"
+    assert any(v is not None for v in fh["series"]["planned_flow"]), fh["series"]["planned_flow"][-5:]
+
     # Daily COP from the same statistics.
     cop = hass.states.get("sensor.heat_pump_cop_yesterday")
     assert cop is not None and cop.state not in ("unknown", "unavailable"), cop

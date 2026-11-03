@@ -54,7 +54,7 @@ title: Heating schedule
 - **Other days:** each day of the week has its own curve. The tabs run from today through the next six days. Pick a day with the tabs, then use **Copy to** to apply it to weekdays, the weekend or every day.
 - **Curve shape:** **Steps** holds each temperature until the next point, and **Ramps** slopes between points.
 - **Save:** saving reruns the forecast straight away. Saving needs an admin user.
-- **Download planning data:** with the battery planner on, this saves a JSON file of everything the planner used for its last plan (forecasts, solar slots, battery level, settings, cheap windows) and what it decided. Useful for reporting a plan that looks wrong.
+- **Download planning data:** saves a JSON file of everything the planners used: for the battery, the forecasts, solar slots, battery level, settings, cheap windows and what it decided; for the flow, the plan, what's been learned, the correction, the daily COP, and the last 48 hours of the heat pump's and the room's readings on a 5-minute grid (room, outdoor, flow, return, flow rate, heat, electricity, the pump's flow target, the planned flow and the room target). Useful for reporting a plan that looks wrong. The flow plan card has the same download.
 - **Reading the chart:** the bars show forecast electricity per period, and the dashed line shows the modelled indoor temperature. Hovering a bar shows the outdoor temperature, the COP, and any shortfall when the heat pump can't keep up. With the battery planner on, the chart also shows the charge and discharge windows, the projected SOC, and a strip under the chart with the planned storage mode: blue for Feed-in priority (export first), grey for Self-Use. Hover the strip for the times.
 
 ## Sensors

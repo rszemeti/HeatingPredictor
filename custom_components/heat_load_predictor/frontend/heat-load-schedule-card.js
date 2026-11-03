@@ -653,7 +653,7 @@ class HeatLoadScheduleCard extends HTMLElement {
       : "No forecast for this day yet";
     const msg = this._msg ? `<span class="msg ${this._msg.bad ? "bad" : ""}">${esc(this._msg.text)}</span>` : "";
     r.querySelector(".footer").innerHTML = `<span class="total">${totalTxt}</span>${msg}<span class="spacer"></span>
-      ${this._battery ? `<button data-plandata title="Save everything the battery planner used for its last plan, as a JSON file">Download planning data</button>` : ""}
+      ${this._battery || (this._forecast || []).some((p) => "flow" in p) ? `<button data-plandata title="Save everything the planners used (battery and flow), with the last 48 h of heat pump and room readings, as a JSON file">Download planning data</button>` : ""}
       <button data-revert ${this._dirty && !this._busy ? "" : "disabled"}>Revert</button>
       <button class="primary" data-save ${this._dirty && !this._busy ? "" : "disabled"}>${this._busy ? "Saving…" : "Save"}</button>`;
     r.querySelector("[data-save]").onclick = () => this._save();
@@ -669,7 +669,7 @@ class HeatLoadScheduleCard extends HTMLElement {
       const stamp = (data.made_at || new Date().toISOString()).slice(0, 16).replace(/[:]/g, "");
       const a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
-      a.download = `battery-plan-${stamp}.json`;
+      a.download = `heat-plan-${stamp}.json`;
       document.body.appendChild(a);
       a.click();
       setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
@@ -809,21 +809,48 @@ class HeatLoadFlowCard extends HTMLElement {
         .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: .85em; color: var(--secondary-text-color); margin-top: 6px; }
         .sw { display: inline-block; width: 18px; height: 0; vertical-align: middle; margin-right: 5px; }
         .err { color: var(--error-color, #db4437); }
+        .dl { color: var(--primary-color, #03a9f4); text-decoration: none; white-space: nowrap; }
       </style>
       <ha-card>
         <div class="title"></div>
         <div class="sum"></div>
         <div class="wrap"><svg></svg><div class="tip"></div></div>
         <div class="legend">
+          <span style="flex:1 1 auto; display:flex; gap:14px; flex-wrap:wrap">
           <span><span class="sw" style="border-top:2px solid #e53935"></span>Planned flow (grey: idle)</span>
           <span><span class="sw" style="border-top:2px solid #1e88e5"></span>Outdoor forecast</span>
           <span><span class="sw" style="border-top:2px dashed var(--primary-text-color,#212121)"></span>Modelled room</span>
           <span><span class="sw" style="border-top:2px solid #8e24aa"></span>Target</span>
+          </span>
+          <a href="#" class="dl" title="Save the plans, what's been learned and the last 48 h of heat pump and room readings, as a JSON file">Download data</a>
         </div>
       </ha-card>`;
     this._svg = root.querySelector("svg");
     this._tip = root.querySelector(".tip");
     this._svg.addEventListener("mouseleave", () => (this._tip.style.display = "none"));
+    root.querySelector(".dl").addEventListener("click", (e) => { e.preventDefault(); this._download(); });
+  }
+
+  async _download() {
+    const link = this.shadowRoot.querySelector(".dl");
+    const was = link.textContent;
+    link.textContent = "Fetching…";
+    try {
+      const msg = { type: `${DOMAIN}/plan_data` };
+      if (this._config.entry_id) msg.entry_id = this._config.entry_id;
+      const data = await this._hass.callWS(msg);
+      const stamp = (data.made_at || new Date().toISOString()).slice(0, 16).replace(/[:]/g, "");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: "application/json" }));
+      a.download = `heat-plan-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      link.textContent = was;
+    } catch (err) {
+      link.textContent = `Couldn't download: ${err.message || err}`;
+      setTimeout(() => (link.textContent = was), 5000);
+    }
   }
 
   _fmt(ms, opts) {

@@ -24,6 +24,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.setup import ATTR_COMPONENT
+from homeassistant.util import dt as dt_util
 
 from .const import CARD_URL, DOMAIN, VERSION
 from .coordinator import HeatLoadCoordinator
@@ -239,15 +240,28 @@ def ws_forecast(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
 @websocket_api.websocket_command(
     {vol.Required("type"): f"{DOMAIN}/plan_data", vol.Optional("entry_id"): str}
 )
-@callback
-def ws_plan_data(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
-    """Everything the battery planner saw on its last run, and what it decided."""
+@websocket_api.async_response
+async def ws_plan_data(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Everything the battery planner saw on its last run and what it decided,
+    plus the flow plan, what's been learned and the last 48 h of the heat
+    pump's and the room's readings."""
     try:
         coord = _coordinator(hass, msg.get("entry_id"))
     except ServiceValidationError:
         connection.send_error(msg["id"], "not_found", _not_found_message(hass))
         return
-    if not coord.plan_inputs:
-        connection.send_error(msg["id"], "no_plan", "The battery planner hasn't made a plan yet.")
+    flow = (coord.data or {}).get("flow")
+    if not coord.plan_inputs and not flow:
+        connection.send_error(msg["id"], "no_plan", "No plan has been made yet.")
         return
-    connection.send_result(msg["id"], coord.plan_inputs)
+    result = dict(coord.plan_inputs or {"version": VERSION, "made_at": dt_util.now().isoformat()})
+    if flow:
+        result["flow"] = flow
+        result["flow_learned_house"] = coord._flow_house.as_dict() if coord._flow_house else None
+        result["daily_cop"] = (coord.data or {}).get("daily_cop")
+        if "recorder" in hass.config.components:
+            try:
+                result["flow_history"] = await coord.async_flow_history()
+            except Exception as err:  # noqa: BLE001 - the rest is still useful
+                result["flow_history"] = {"error": str(err)}
+    connection.send_result(msg["id"], result)
