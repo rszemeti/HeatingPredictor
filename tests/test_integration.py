@@ -563,3 +563,44 @@ async def test_flow_control_switch(hass: HomeAssistant, fake_weather, freezer) -
     hass.states.async_set("sensor.hp_room", "21.5", {"unit_of_measurement": "°C"})
     await coord.async_refresh()
     assert len(calls) == m
+
+
+async def test_flow_correction_catches_up(hass: HomeAssistant, fake_weather, freezer) -> None:
+    """3 Nov: room 21.7 against 22 for hours and the correction never moved
+    (its 'settled' test looked at the forecast room, which starts from the
+    measured room). Now: a proportional step straight away, and the integral
+    keeps adding while the room stays low."""
+    hass.states.async_set("number.hp_flow_target", "35.0", {"min": 25, "max": 55, "step": 0.5})
+    hass.states.async_set("sensor.hp_room", "20.0", {"unit_of_measurement": "°C"})
+
+    async def set_value(call):
+        hass.states.async_set("number.hp_flow_target", str(call.data["value"]),
+                              {"min": 25, "max": 55, "step": 0.5})
+    hass.services.async_register("number", "set_value", set_value)
+    entry = await _setup(hass, {**OPTIONS, "hp_flow_target_entity": "number.hp_flow_target",
+                                "hp_room_entity": "sensor.hp_room"})
+    coord = entry.runtime_data
+    target = coord.data["flow"]["target_now"]
+    hass.states.async_set("sensor.hp_room", str(target - 0.3), {"unit_of_measurement": "°C"})
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.heat_pump_flow_control"}, blocking=True)
+    await hass.async_block_till_done()
+    seen = []
+    for _ in range(5):
+        freezer.tick(timedelta(minutes=15))
+        await coord.async_refresh()
+        f = coord.data["flow"]
+        if f["target_now"] != target:          # schedule stepped: not this test's case
+            break
+        seen.append(f["correction"])
+    assert len(seen) >= 3, seen
+    assert seen[0] >= 0.35                      # proportional: ~2 x (0.3 - 0.1 dead band)
+    assert seen[-1] > seen[0]                   # integral keeps adding
+    # Room back at the target: no proportional push, integral holds.
+    hass.states.async_set("sensor.hp_room", str(target), {"unit_of_measurement": "°C"})
+    freezer.tick(timedelta(minutes=15))
+    await coord.async_refresh()
+    held = coord.data["flow"]["correction"]
+    assert 0 < held < seen[-1]
+    freezer.tick(timedelta(minutes=15))
+    await coord.async_refresh()
+    assert coord.data["flow"]["correction"] == held

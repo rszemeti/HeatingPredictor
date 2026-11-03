@@ -349,19 +349,29 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Live correction: a slow integral of (target - room). The forecast
         # already starts from the measured room temperature; this only takes
         # out a steady bias (radiators or heat loss a bit off).
-        # Only while the heat pump is following the plan (Flow control on and
-        # writing), and only when the plan expects to be at the target now (not
-        # during a scheduled warm-up or cool-down); otherwise it means nothing.
+        # PI on (target - room): only while the heat pump is following the plan
+        # (Flow control on), and only once the target has been steady for two
+        # hours (not during a scheduled warm-up or cool-down, which the plan
+        # already allows for). A 0.1 °C dead band for the room sensor's steps.
+        # About 2 °C of flow per °C of room error, the integral adding 1 °C of
+        # flow per °C of error per hour.
         room = self._num(o.get(CONF_HP_ROOM), "°C") or self._indoor_temp()
         now_utc = dt_util.utcnow()
-        settled = bool(results) and abs(results[0].t_in_start - target(now_utc)) < 0.3
+        t_now = target(now_utc)
+        settled = all(abs(target(now_utc - timedelta(minutes=m)) - t_now) < 0.05
+                      for m in (30, 60, 90, 120))
+        err = 0.0
+        if room is not None and settled:
+            e = t_now - room
+            err = 0.0 if abs(e) <= 0.1 else e - (0.1 if e > 0 else -0.1)
         if not self._flow_following:
             self._flow_correction = 0.0
-        elif room is not None and self._flow_corr_at is not None and settled:
+            err = 0.0
+        elif self._flow_corr_at is not None and err:
             dt_h = min(1.0, (now_utc - self._flow_corr_at).total_seconds() / 3600)
-            err = target(now_utc) - room
-            self._flow_correction = max(-5.0, min(5.0, self._flow_correction + 0.5 * err * dt_h))
+            self._flow_correction = max(-5.0, min(5.0, self._flow_correction + 1.0 * err * dt_h))
         self._flow_corr_at = now_utc
+        correction = max(-6.0, min(6.0, self._flow_correction + 2.0 * err))
 
         house = self._flow_house
         if house:
@@ -373,11 +383,11 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
                 room_mid = (r.t_in_start + r.t_in_end) / 2
                 f = house.flow(room_mid, r.t_out, (r.t_in_end - r.t_in_start) / per_h)
-                f = min(p.flow_max, max(p.flow_min, f + self._flow_correction))
+                f = min(p.flow_max, max(p.flow_min, f + correction))
                 flows.append(round(f * 2) / 2)
         else:
             rows = [(r.heat_kw, (r.t_in_start + r.t_in_end) / 2) for r in results]
-            flows = flowlaw.plan_flows(rows, p, self._flow_correction)
+            flows = flowlaw.plan_flows(rows, p, correction)
         cop_model = learned.cop
         plan = []
         for r, f, row in zip(results, flows, data["periods"]):
@@ -397,7 +407,10 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "now": flows[0] if flows else None,
             "idle_now": bool(flows) and flows[0] is None,
             "plan": plan,
-            "correction": round(self._flow_correction, 2),
+            "correction": round(correction, 2),
+            "correction_parts": {"proportional": round(correction - self._flow_correction, 2),
+                                 "integral": round(self._flow_correction, 2),
+                                 "room_error": round(err, 2), "target_steady": settled},
             "emitter_k": round(k, 4),
             "emitter_k_from": "learned" if learned.k else "setting",
             "flow_rate_lpm": round(lpm, 1),
