@@ -120,6 +120,12 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(minutes=min(15, self.period)),
         )
         self._store: Store[dict] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
+        # Things worth keeping over a restart: the flow correction's integral
+        # and the last good weather forecast.
+        self._state_store: Store[dict] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.state")
+        self._weather_cache: list[tuple[datetime, float]] = []
+        self._weather_cache_at: datetime | None = None
+        self.weather_note: str | None = None
         self.schedule: dict = default_schedule()
         # Modelled indoor temperature from the last run, (UTC time, °C), used
         # as the starting point when there's no indoor sensor.
@@ -187,6 +193,36 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.schedule = validate_schedule(stored)
             except (ValueError, KeyError, TypeError) as err:
                 _LOGGER.warning("Stored schedule invalid (%s); using default", err)
+        await self._async_load_state()
+
+    async def _async_load_state(self) -> None:
+        try:
+            st = await self._state_store.async_load() or {}
+        except Exception as err:  # noqa: BLE001 - a fresh start is fine
+            _LOGGER.debug("No saved state: %s", err)
+            return
+        now = dt_util.utcnow()
+        at = dt_util.parse_datetime(str(st.get("correction_at") or ""))
+        if at and now - at < timedelta(hours=6):
+            self._flow_correction = max(-5.0, min(5.0, float(st.get("correction", 0.0))))
+        wat = dt_util.parse_datetime(str(st.get("weather_at") or ""))
+        if wat and now - wat < timedelta(hours=12):
+            pts = []
+            for t, v in st.get("weather") or []:
+                when = dt_util.parse_datetime(t)
+                if when is not None:
+                    pts.append((when, float(v)))
+            self._weather_cache, self._weather_cache_at = pts, wat
+
+    def _save_state(self) -> None:
+        def data() -> dict:
+            return {
+                "correction": self._flow_correction,
+                "correction_at": dt_util.utcnow().isoformat(),
+                "weather": [(t.isoformat(), v) for t, v in self._weather_cache],
+                "weather_at": self._weather_cache_at.isoformat() if self._weather_cache_at else None,
+            }
+        self._state_store.async_delay_save(data, 60)
 
     async def async_set_schedule(self, schedule: dict) -> dict:
         cleaned = validate_schedule(schedule)  # raises ValueError
@@ -198,6 +234,31 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ---------------------------------------------------------------- forecast
 
     async def _async_forecast_points(self) -> list[tuple[datetime, float]]:
+        """The weather forecast; if the weather entity is down (Met.no has
+        outages), the last good forecast for up to 12 hours rather than
+        stopping every plan."""
+        try:
+            points = await self._async_fetch_forecast_points()
+        except UpdateFailed as err:
+            now = dt_util.utcnow()
+            cached = [p for p in self._weather_cache if p[0] >= now - timedelta(hours=1)]
+            if (self._weather_cache_at and now - self._weather_cache_at < timedelta(hours=12)
+                    and len(cached) >= 2 and max(p[0] for p in cached) > now + timedelta(hours=6)):
+                if self.weather_note is None:
+                    _LOGGER.warning("%s; using the forecast from %s", err,
+                                    dt_util.as_local(self._weather_cache_at).strftime("%H:%M"))
+                self.weather_note = (f"{err}; using the forecast from "
+                                     f"{dt_util.as_local(self._weather_cache_at):%H:%M}")
+                return cached
+            raise
+        if self.weather_note:
+            _LOGGER.info("Weather forecast available again")
+        self.weather_note = None
+        self._weather_cache, self._weather_cache_at = points, dt_util.utcnow()
+        self._save_state()
+        return points
+
+    async def _async_fetch_forecast_points(self) -> list[tuple[datetime, float]]:
         entity_id = self.config_entry.options[CONF_WEATHER]
         state = self.hass.states.get(entity_id)
         if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
@@ -364,14 +425,18 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if room is not None and settled:
             e = t_now - room
             err = 0.0 if abs(e) <= 0.1 else e - (0.1 if e > 0 else -0.1)
-        if not self._flow_following:
-            self._flow_correction = 0.0
+        # The integral is zeroed only when Flow control is switched on or off,
+        # and saved, so a restart (or a run that can't confirm the pump is
+        # following) holds it rather than losing it.
+        if not self.flow_control or not self._flow_following:
             err = 0.0
         elif self._flow_corr_at is not None and err:
             dt_h = min(1.0, (now_utc - self._flow_corr_at).total_seconds() / 3600)
             self._flow_correction = max(-5.0, min(5.0, self._flow_correction + 1.0 * err * dt_h))
+            self._save_state()
         self._flow_corr_at = now_utc
-        correction = max(-6.0, min(6.0, self._flow_correction + 2.0 * err))
+        correction = (max(-6.0, min(6.0, self._flow_correction + 2.0 * err))
+                      if self.flow_control else 0.0)
 
         house = self._flow_house
         if house:
@@ -408,7 +473,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "idle_now": bool(flows) and flows[0] is None,
             "plan": plan,
             "correction": round(correction, 2),
-            "correction_parts": {"proportional": round(correction - self._flow_correction, 2),
+            "weather_note": self.weather_note,
+            "correction_parts": {"proportional": round(2.0 * err, 2) if self.flow_control else 0.0,
                                  "integral": round(self._flow_correction, 2),
                                  "room_error": round(err, 2), "target_steady": settled},
             "emitter_k": round(k, 4),
@@ -461,6 +527,9 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self._async_write_flow(eid, self.flow_restore_to)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Flow control: couldn't put back %s: %s", eid, err)
+        if on != self.flow_control:
+            self._flow_correction = 0.0          # a fresh start either way
+            self._save_state()
         self.flow_control = on
         if not on:
             self._flow_control_status = "off"

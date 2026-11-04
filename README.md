@@ -253,6 +253,11 @@ While it's on, every run (every 15 minutes):
 
 The switch's `status` attribute (and the flow sensor's `control` attribute) says what it last did and why.
 
+## When things go missing
+
+- **Weather forecast unavailable** (Met.no has outages): the last good forecast is used for up to 12 hours, so the heating, battery and flow plans carry on. It's saved, so this works across a restart too. The flow sensor's `weather_note` says when it's in use.
+- **Restarts:** the flow correction's built-up part is saved and picked up again (if it's under 6 hours old). It's cleared only when Flow control is switched on or off. The Flow control switch remembers its state; what's learned is relearned from history within a minute.
+
 ## How the model works
 
 The house is treated as one thermal mass:

@@ -604,3 +604,74 @@ async def test_flow_correction_catches_up(hass: HomeAssistant, fake_weather, fre
     freezer.tick(timedelta(minutes=15))
     await coord.async_refresh()
     assert coord.data["flow"]["correction"] == held
+
+
+async def test_weather_outage_keeps_the_plans(hass: HomeAssistant, fake_weather, freezer) -> None:
+    """4 Nov: Met.no returned 503, the weather entity went unavailable and
+    every plan with it. Now the last good forecast carries on (up to 12 h),
+    across a reload too."""
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    entry = await _setup(hass, dict(OPTIONS))
+    coord = entry.runtime_data
+    before = coord.data["current_kwh"]
+    hass.states.async_set("weather.home", "unavailable")
+    freezer.tick(timedelta(minutes=15))
+    await coord.async_refresh()
+    assert coord.last_update_success
+    assert "unavailable" in coord.weather_note
+    assert coord.data["current_kwh"] == pytest.approx(before, rel=0.5)
+    # Saved; a reload while it's still down still plans.
+    freezer.tick(timedelta(seconds=90))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.runtime_data.last_update_success
+    assert hass.states.get("sensor.heat_pump_flow_target").state != "unavailable"
+    # Far too old: gives up rather than plan on a stale forecast.
+    freezer.tick(timedelta(hours=13))
+    await entry.runtime_data.async_refresh()
+    assert not entry.runtime_data.last_update_success
+    # Back again.
+    hass.states.async_set("weather.home", "cloudy", {"temperature": 2.0})
+    await entry.runtime_data.async_refresh()
+    assert entry.runtime_data.last_update_success and entry.runtime_data.weather_note is None
+
+
+async def test_flow_correction_survives_a_restart(hass: HomeAssistant, fake_weather, freezer) -> None:
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    hass.states.async_set("number.hp_flow_target", "35.0", {"min": 25, "max": 55, "step": 0.5})
+    hass.states.async_set("sensor.hp_room", "20.0", {"unit_of_measurement": "°C"})
+
+    async def set_value(call):
+        hass.states.async_set("number.hp_flow_target", str(call.data["value"]),
+                              {"min": 25, "max": 55, "step": 0.5})
+    hass.services.async_register("number", "set_value", set_value)
+    entry = await _setup(hass, {**OPTIONS, "hp_flow_target_entity": "number.hp_flow_target",
+                                "hp_room_entity": "sensor.hp_room"})
+    coord = entry.runtime_data
+    target = coord.data["flow"]["target_now"]
+    hass.states.async_set("sensor.hp_room", str(target - 0.5), {"unit_of_measurement": "°C"})
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.heat_pump_flow_control"}, blocking=True)
+    await hass.async_block_till_done()
+    for _ in range(4):
+        freezer.tick(timedelta(minutes=15))
+        await coord.async_refresh()
+    built = coord.data["flow"]["correction_parts"]["integral"]
+    assert built > 0.3, coord.data["flow"]["correction_parts"]
+    freezer.tick(timedelta(seconds=90))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    c2 = entry.runtime_data
+    assert c2.flow_control                       # the switch came back on
+    await c2.async_refresh()
+    assert c2.data["flow"]["correction_parts"]["integral"] >= built - 0.01
+    assert c2.data["flow"]["correction"] >= built - 0.01
+    # Switching off clears it.
+    await hass.services.async_call("switch", "turn_off", {"entity_id": "switch.heat_pump_flow_control"}, blocking=True)
+    await hass.async_block_till_done()
+    assert c2.data["flow"]["correction_parts"]["integral"] == 0 and c2.data["flow"]["correction"] == 0
