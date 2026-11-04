@@ -196,6 +196,10 @@ Take the figures from your heat pump's datasheet, at the flow temperature your w
 
 This is the heat pump's maximum heat output in kW at each outdoor temperature, in the same format, for example `-10:6, -5:6.6, 2:7, 7:8`. When demand exceeds it, the forecast caps the output and reports a `shortfall_k`.
 
+### Outdoor temperature now
+
+If you set the heat pump's outdoor temperature sensor (under Flow temperature planning), the forecast starts from its last 30 minutes' average instead of the weather service's figure for now, and fades back to the forecast over three hours. So if it's 2 °C colder at the house than the forecast says, the next few hours (and the flow written now) allow for it. A reading more than 6 °C off the forecast is taken as a fault and ignored. The flow sensor's `outdoor_now` attribute shows the reading, the forecast and the difference.
+
 ### Other settings
 
 - **Standby power (W):** the controller and circulation pump, added to every period.
@@ -283,7 +287,7 @@ The switch's `status` attribute (and the flow sensor's `control` attribute) says
 
 ## When things go missing
 
-- **Weather forecast unavailable** (Met.no has outages): the last good forecast is used for up to 12 hours, so the heating, battery and flow plans carry on. It's saved, so this works across a restart too. The flow sensor's `weather_note` says when it's in use.
+- **Weather forecast unavailable** (Met.no has outages): the last good forecast is used for up to 12 hours, so the heating, battery and flow plans carry on. It's saved, so this works across a restart too. Beyond that, or with nothing saved, the heat pump's outdoor sensor (if set) is held flat for the whole forecast: crude, but the plans keep running. The flow sensor's `weather_note` says which is in use.
 - **Restarts:** the flow correction's built-up part is saved and picked up again (if it's under 6 hours old). It's cleared only when Flow control is switched on or off. The Flow control switch remembers its state; what's learned is relearned from history within a minute.
 
 ## How the model works

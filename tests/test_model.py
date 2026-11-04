@@ -183,3 +183,21 @@ def test_realistic_cold_day():
     elec = sum(r.elec_kwh for r in res)
     assert 75 < heat < 100
     assert 28 < elec < 40
+
+
+def test_nudge_forecast_fades_back_to_the_forecast():
+    from datetime import datetime, timedelta, timezone
+    from custom_components.heat_load_predictor.model import forecast_interpolator, nudge_forecast
+
+    t0 = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
+    pts = [(t0 + timedelta(hours=h), 8.0) for h in range(-2, 24)]
+    now = t0 + timedelta(minutes=20)
+    out, bias = nudge_forecast(pts, now, 5.0)
+    fn = forecast_interpolator(out)
+    assert bias == -3.0
+    assert fn(now) == 5.0
+    assert fn(now + timedelta(hours=1.5)) == pytest.approx(6.5, abs=0.05)
+    assert fn(now + timedelta(hours=3)) == 8.0
+    assert fn(now + timedelta(hours=10)) == 8.0
+    assert fn(now - timedelta(minutes=15)) == 5.0   # the half-hour the reading averages
+    assert fn(now - timedelta(hours=3)) == 8.0      # earlier past untouched

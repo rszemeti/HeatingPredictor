@@ -682,3 +682,34 @@ async def test_entities_have_unique_ids(hass: HomeAssistant, fake_weather, caplo
     await _setup(hass, {**OPTIONS, **BATTERY})
     assert "does not generate unique IDs" not in caplog.text
     assert "already exists" not in caplog.text
+
+
+async def test_outdoor_sensor_starts_the_forecast(hass: HomeAssistant, fake_weather, freezer) -> None:
+    """The heat pump's outdoor reading sets 'now' (the forecast says 2 °C,
+    the house reads 0 °C), fading back to the forecast over three hours."""
+    hass.states.async_set("sensor.hp_outdoor", "0.0", {"unit_of_measurement": "°C"})
+    entry = await _setup(hass, {**OPTIONS, "hp_outdoor_entity": "sensor.hp_outdoor"})
+    coord = entry.runtime_data
+    rows = coord.data["periods"]
+    assert rows[0]["t_out"] < 0.6
+    assert rows[10]["t_out"] == pytest.approx(2.0, abs=0.05)
+    on = coord.data["flow"]["outdoor_now"]
+    assert on["used"] and on["difference"] == pytest.approx(-2.0, abs=0.01)
+    # A faulty sensor far from the forecast is ignored.
+    hass.states.async_set("sensor.hp_outdoor", "-30.0", {"unit_of_measurement": "°C"})
+    freezer.tick(timedelta(minutes=15))
+    await coord.async_refresh()
+    assert coord.data["periods"][0]["t_out"] == pytest.approx(2.0, abs=0.05)
+    assert coord.data["flow"]["outdoor_now"]["used"] is False
+
+
+async def test_no_forecast_at_all_uses_the_outdoor_sensor(hass: HomeAssistant, fake_weather) -> None:
+    """Weather down from the start, nothing saved: the outdoor sensor, held flat."""
+    hass.states.async_set("weather.home", "unavailable")
+    hass.states.async_set("sensor.hp_outdoor", "4.0", {"unit_of_measurement": "°C"})
+    entry = await _setup(hass, {**OPTIONS, "hp_outdoor_entity": "sensor.hp_outdoor"})
+    coord = entry.runtime_data
+    assert coord.last_update_success
+    assert "held flat" in coord.weather_note
+    ts = [r["t_out"] for r in coord.data["periods"]]
+    assert len(ts) >= 40 and all(t == pytest.approx(4.0) for t in ts)

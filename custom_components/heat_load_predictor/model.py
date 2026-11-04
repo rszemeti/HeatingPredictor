@@ -301,6 +301,35 @@ def simulate(
     return results
 
 
+def nudge_forecast(
+    points: Sequence[tuple[datetime, float]],
+    now: datetime,
+    measured: float,
+    fade_hours: float = 3.0,
+) -> tuple[list[tuple[datetime, float]], float]:
+    """Start the forecast from a measured outdoor temperature.
+
+    The difference between the measurement and the forecast for now is added
+    at `now` (and over the half-hour before, which the reading averages) and
+    fades out linearly over `fade_hours`, so the next few hours follow the
+    house's own reading and later hours the forecast. Returns the new points
+    and the difference applied."""
+    fn = forecast_interpolator(points)
+    bias = measured - fn(now)
+    # The measurement is a recent average: it stands for the last half-hour.
+    out = [p for p in points if p[0] < now - timedelta(hours=1)]
+    out += [(now - timedelta(minutes=30), measured), (now, measured)]
+    steps = max(1, int(fade_hours))
+    marks = {now + timedelta(hours=fade_hours * k / steps) for k in range(1, steps + 1)}
+    for t, v in sorted(points):
+        if t > now:
+            marks.add(t)
+    for t in sorted(marks):
+        w = max(0.0, 1.0 - (t - now).total_seconds() / 3600 / fade_hours)
+        out.append((t, fn(t) + bias * w))
+    return out, bias
+
+
 def forecast_interpolator(
     points: Sequence[tuple[datetime, float]],
 ) -> Callable[[datetime], float]:

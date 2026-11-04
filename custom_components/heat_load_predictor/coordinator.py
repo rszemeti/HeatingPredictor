@@ -90,6 +90,7 @@ from .model import (
     align_down,
     default_schedule,
     forecast_interpolator,
+    nudge_forecast,
     parse_curve,
     schedule_temp,
     simulate,
@@ -126,6 +127,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._weather_cache: list[tuple[datetime, float]] = []
         self._weather_cache_at: datetime | None = None
         self.weather_note: str | None = None
+        self.outdoor_now: dict | None = None
         self.schedule: dict = default_schedule()
         # Modelled indoor temperature from the last run, (UTC time, °C), used
         # as the starting point when there's no indoor sensor.
@@ -249,14 +251,68 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     dt_util.as_local(self._weather_cache_at).strftime("%H:%M"))
                 self.weather_note = (f"{err}; using the forecast from "
                                      f"{dt_util.as_local(self._weather_cache_at):%H:%M}")
-                return cached
-            raise
+                return await self._async_nudge(cached)
+            # Last resort: the heat pump's own outdoor reading, held flat.
+            measured = await self._async_outdoor_measured()
+            if measured is None:
+                raise
+            if self.weather_note is None or "held flat" not in self.weather_note:
+                _LOGGER.warning("%s and no recent forecast; using the outdoor sensor, held flat", err)
+            self.weather_note = f"{err}; no recent forecast, so the outdoor sensor's {measured:.1f} °C held flat"
+            horizon_h = int(self.config_entry.options.get(CONF_HORIZON, DEFAULT_HORIZON))
+            self.outdoor_now = {"measured": round(measured, 1), "forecast": None, "difference": None}
+            return [(now - timedelta(hours=1), measured), (now + timedelta(hours=horizon_h + 1), measured)]
         if self.weather_note:
             _LOGGER.info("Weather forecast available again")
         self.weather_note = None
         self._weather_cache, self._weather_cache_at = points, dt_util.utcnow()
         self._save_state()
-        return points
+        return await self._async_nudge(points)
+
+    async def _async_outdoor_measured(self) -> float | None:
+        """The heat pump's outdoor sensor, averaged over the last 30 minutes
+        (the unit's own airflow and defrosts move a single reading about)."""
+        eid = self.config_entry.options.get(CONF_HP_OUTDOOR)
+        if not eid:
+            return None
+        if "recorder" in self.hass.config.components:
+            from homeassistant.components.recorder.statistics import statistics_during_period
+            from homeassistant.helpers.recorder import get_instance
+
+            now = dt_util.utcnow()
+
+            def fetch() -> dict:
+                return statistics_during_period(
+                    self.hass, now - timedelta(minutes=35), None, {eid}, "5minute",
+                    {"temperature": "°C"}, {"mean"})
+            try:
+                rows = (await get_instance(self.hass).async_add_executor_job(fetch)).get(eid, [])
+                vals = [r["mean"] for r in rows if r.get("mean") is not None]
+                if len(vals) >= 3:
+                    return sum(vals) / len(vals)
+            except Exception as err:  # noqa: BLE001 - fall back to the current reading
+                _LOGGER.debug("No outdoor statistics: %s", err)
+        return self._num(eid, "°C")
+
+    async def _async_nudge(self, points: list[tuple[datetime, float]]) -> list[tuple[datetime, float]]:
+        """Start the forecast from the heat pump's outdoor reading, fading
+        back to the forecast over three hours. Ignored if it's wildly out
+        (more than 6 °C off the forecast: a fault, not the weather)."""
+        measured = await self._async_outdoor_measured()
+        if measured is None:
+            self.outdoor_now = None
+            return points
+        now = dt_util.utcnow()
+        forecast_now = forecast_interpolator(points)(now)
+        if abs(measured - forecast_now) > 6:
+            self.outdoor_now = {"measured": round(measured, 1), "forecast": round(forecast_now, 1),
+                                "difference": round(measured - forecast_now, 1),
+                                "used": False}
+            return points
+        nudged, bias = nudge_forecast(points, now, measured)
+        self.outdoor_now = {"measured": round(measured, 1), "forecast": round(forecast_now, 1),
+                            "difference": round(bias, 1), "used": True}
+        return nudged
 
     async def _async_fetch_forecast_points(self) -> list[tuple[datetime, float]]:
         entity_id = self.config_entry.options[CONF_WEATHER]
@@ -474,6 +530,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "plan": plan,
             "correction": round(correction, 2),
             "weather_note": self.weather_note,
+            "outdoor_now": self.outdoor_now,
             "correction_parts": {"proportional": round(2.0 * err, 2) if self.flow_control else 0.0,
                                  "integral": round(self._flow_correction, 2),
                                  "room_error": round(err, 2), "target_steady": settled},
