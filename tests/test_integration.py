@@ -675,3 +675,10 @@ async def test_flow_correction_survives_a_restart(hass: HomeAssistant, fake_weat
     await hass.services.async_call("switch", "turn_off", {"entity_id": "switch.heat_pump_flow_control"}, blocking=True)
     await hass.async_block_till_done()
     assert c2.data["flow"]["correction_parts"]["integral"] == 0 and c2.data["flow"]["correction"] == 0
+
+
+async def test_entities_have_unique_ids(hass: HomeAssistant, fake_weather, caplog) -> None:
+    """0.5.6 registered the room target sensor twice ("does not generate unique IDs")."""
+    await _setup(hass, {**OPTIONS, **BATTERY})
+    assert "does not generate unique IDs" not in caplog.text
+    assert "already exists" not in caplog.text

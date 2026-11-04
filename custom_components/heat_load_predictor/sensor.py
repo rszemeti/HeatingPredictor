@@ -89,7 +89,6 @@ async def async_setup_entry(
     entities.append(FlowTargetSensor(coordinator))
     entities.append(DailyCopSensor(coordinator))
     entities.append(RoomTargetSensor(coordinator))
-    entities.append(RoomTargetSensor(coordinator))
     async_add_entities(entities)
 
 
@@ -288,28 +287,6 @@ class DailyCopSensor(CoordinatorEntity[HeatLoadCoordinator], SensorEntity):
             "days": [d for d in days if not d["today"]][-7:],
             "today": today,
         }
-
-
-class RoomTargetSensor(CoordinatorEntity[HeatLoadCoordinator], SensorEntity):
-    """The schedule's room target right now (what the planner heats to)."""
-
-    _attr_has_entity_name = True
-    _attr_translation_key = "room_target"
-    _attr_device_class = SensorDeviceClass.TEMPERATURE
-    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_suggested_display_precision = 1
-
-    def __init__(self, coordinator: HeatLoadCoordinator) -> None:
-        super().__init__(coordinator)
-        entry = coordinator.config_entry
-        self._attr_unique_id = f"{entry.entry_id}_room_target"
-        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)})
-
-    @property
-    def native_value(self) -> float | None:
-        f = (self.coordinator.data or {}).get("flow") or {}
-        return f.get("target_now")
 
 
 class RoomTargetSensor(CoordinatorEntity[HeatLoadCoordinator], SensorEntity):

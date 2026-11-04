@@ -4,18 +4,22 @@
 [![Validate](https://github.com/rszemeti/HeatingPredictor/actions/workflows/validate.yml/badge.svg)](https://github.com/rszemeti/HeatingPredictor/actions/workflows/validate.yml)
 [![Tests](https://github.com/rszemeti/HeatingPredictor/actions/workflows/tests.yml/badge.svg)](https://github.com/rszemeti/HeatingPredictor/actions/workflows/tests.yml)
 
-A Home Assistant integration that forecasts how much **electricity your heat pump will use** in each period (30 minutes by default) over the next one to two days. Use it to decide how much to charge a home battery on a cheap overnight tariff, to plan around time-of-use prices, or just to see what tomorrow's heating will cost.
+A Home Assistant integration for a house heated by a heat pump. It does three jobs; the first is always on and the other two are optional:
 
-It works from:
-
-- your **weather forecast** (any `weather` entity with an hourly forecast)
-- a **daily target temperature curve**, which you draw on a dashboard card
-- your heat pump's **COP curve** and **maximum heat output**
-- your house's **heat loss**, **thermal capacity** and **internal gains**
-
-The house is modelled as a single thermal mass rather than a fixed load per degree. Setbacks therefore show up as coasting down and then recovering. With **pre-heat** on, heating starts early enough to reach each step up in your schedule on time, so the heavy periods fall where the heat pump will actually run.
+1. **Forecasts the heating.** For each half-hour over the next one to two days it works out how warm the house will be and how much electricity the heat pump will use, from your weather forecast and a daily target temperature curve that you draw on a dashboard card.
+2. **Plans a home battery** *(optional)*. On a time-of-use tariff with solar, it decides when to charge from the grid, when to discharge to make room for solar, and whether the inverter should store or export solar, so you never buy at full price what the battery or the sun could have covered. An example automation applies the plan to a Solis inverter.
+3. **Sets the heat pump's flow temperature** *(optional)*. It learns your house and radiators from the heat pump's own readings, works out the flow temperature each half-hour needs to follow your schedule, and, if you switch it on, writes it to the heat pump. In effect it replaces the heat pump's own weather compensation curve with one learned from your house, corrected by the room temperature.
 
 ![Schedule card](docs/card.png)
+
+### What you need
+
+| For | You need |
+|---|---|
+| The heating forecast | A `weather` entity with an hourly forecast (Met.no works). An indoor temperature sensor is optional but recommended. |
+| The battery planner | A battery SOC sensor, the [Solcast](https://github.com/BJReplay/ha-solcast-solar) solar forecast and, for tariff-based windows, the [Octopus Energy](https://github.com/BottlecapDave/HomeAssistant-OctopusEnergy) integration. A whole-house power sensor lets it learn the rest of the house's use. To apply the plan: an inverter you can control from Home Assistant (the example is for Solis). |
+| Flow temperature planning | The heat pump's flow and return temperatures, outdoor temperature and a room temperature sensor, ideally also heat output, electricity in and flow rate, all with history (`state_class: measurement`). For example from an ESPHome controller on the heat pump's RS-485 bus. |
+| Flow control | A number entity that sets the heat pump's flow temperature, with the heat pump on a fixed flow temperature (its own weather compensation off). |
 
 ## Installation
 
@@ -25,17 +29,24 @@ The house is modelled as a single thermal mass rather than a fixed load per degr
 2. Add `https://github.com/rszemeti/HeatingPredictor` with the type **Integration**.
 3. Find **Heat Load Predictor** in HACS, download it, and restart Home Assistant.
 
+Updates come through HACS the same way. Each update needs a Home Assistant restart. Nothing is lost by restarting: the schedule, the flow correction, the last weather forecast and the Flow control switch are all kept, and what's learned is relearned from history within a minute.
+
 ### Manual
 
 Copy `custom_components/heat_load_predictor` into your `config/custom_components/` folder, then restart Home Assistant.
 
 ### Set up
 
-Go to **Settings → Devices & services → Add integration → Heat Load Predictor**. Choose your weather entity and, optionally, an indoor temperature sensor. The other defaults describe a typical house with an 8 kW heat pump. You'll get much better forecasts once you replace them with your own figures, as explained below.
+1. **Settings → Devices & services → Add integration → Heat Load Predictor.** Choose your weather entity and, ideally, an indoor temperature sensor. The other figures describe a typical house with an 8 kW heat pump; see [Getting your numbers right](#getting-your-numbers-right). With flow temperature planning set up, the most important of them are learned for you.
+2. Add the [schedule card](#the-schedule-card) to a dashboard and draw your target temperatures.
+3. *(Optional)* **Configure → Battery planner** to plan a battery. See [Battery planner](#battery-planner-optional).
+4. *(Optional)* **Configure → Flow temperature planning** to point it at your heat pump's readings. Watch the plan for a day or two on the [flow plan card](#the-flow-plan-card), then turn on **Flow control** when you're happy. See [Flow temperature planning and control](#flow-temperature-planning-and-control).
 
-## The schedule card
+## Dashboard cards
 
-The card is served by the integration and loads automatically, so you don't need to add a dashboard resource. Add it to a dashboard:
+Both cards are served by the integration and load automatically, so you don't need to add a dashboard resource.
+
+### The schedule card
 
 ```yaml
 type: custom:heat-load-schedule-card
@@ -45,29 +56,53 @@ title: Heating schedule
 # temp_step: 0.5       # °C; dragging snaps to this (hold Shift for 0.1)
 # y_min: 14            # temperature axis range (it widens to fit your points)
 # y_max: 24
-# show_battery: true  # battery windows and projected SOC (needs the battery planner)
-# show_solar: true    # solar forecast bars, on their own scale
-# show_flow: true     # planned flow and forecast outdoor temperature, in a strip under the chart
+# show_battery: true   # battery windows and projected SOC (needs the battery planner)
+# show_solar: true     # solar forecast bars, on their own scale
+# show_flow: true      # planned flow and forecast outdoor temperature, in a strip under the chart
 ```
 
 - **Edit points:** drag a point to move it, click empty space to add one, and double-click (or right-click) a point to delete it. The table under the chart gives exact times and temperatures.
 - **Other days:** each day of the week has its own curve. The tabs run from today through the next six days. Pick a day with the tabs, then use **Copy to** to apply it to weekdays, the weekend or every day.
 - **Curve shape:** **Steps** holds each temperature until the next point, and **Ramps** slopes between points.
 - **Save:** saving reruns the forecast straight away. Saving needs an admin user.
-- **Download planning data:** saves a JSON file of everything the planners used: for the battery, the forecasts, solar slots, battery level, settings, cheap windows and what it decided; for the flow, the plan, what's been learned, the correction, the daily COP, and the last 48 hours of the heat pump's and the room's readings on a 5-minute grid (room, outdoor, flow, return, flow rate, heat, electricity, the pump's flow target, the planned flow and the room target). Useful for reporting a plan that looks wrong. The flow plan card has the same download.
-- **Reading the chart:** the bars show forecast electricity per period, and the dashed line shows the modelled indoor temperature. Hovering a bar shows the outdoor temperature, the COP, and any shortfall when the heat pump can't keep up. With the battery planner on, the chart also shows the charge and discharge windows, the projected SOC, and a strip under the chart with the planned storage mode: blue for Feed-in priority (export first), grey for Self-Use. Hover the strip for the times.
+- **Reading the chart:** the bars show forecast electricity per period, and the dashed line shows the modelled indoor temperature. Hovering a bar shows the outdoor temperature, the COP, the planned flow and any shortfall when the heat pump can't keep up. With the battery planner on, the chart also shows the charge and discharge windows, the projected SOC, and a strip under the chart with the planned storage mode: blue for Feed-in priority (export first), grey for Self-Use. With flow planning on, a second strip shows the planned flow temperature and the forecast outdoor temperature.
+- **Download planning data:** saves a JSON file of everything the planners used. For the battery: the forecasts, solar slots, battery level, settings, cheap windows and what it decided. For the flow: the plan, what's been learned, the correction, the daily COP, and the last 48 hours of the heat pump's and the room's readings on a 5-minute grid. Useful for reporting a plan that looks wrong.
 
-## Sensors
+### The flow plan card
+
+```yaml
+type: custom:heat-load-flow-card
+hours: 24          # how far ahead
+```
+
+The next hours of the flow plan: the flow temperature (grey where the heat pump idles) above, and the forecast outdoor temperature, modelled room and target below. Hover for each half-hour's flow, heat, temperatures and COP. The line above the chart gives the flow now, the next change, the range and the idle time. **Download data** saves the same file as the schedule card.
+
+## Entities
+
+All entities belong to one device, named after the integration entry (for example "Heat pump", giving `sensor.heat_pump_…`).
+
+**Heating forecast**
 
 | Entity | Meaning |
 |---|---|
-| `…_heating_electricity_this_period` | kWh for the current period. Its `forecast` attribute lists every period with `start`, `kwh`, `heat_kwh`, `t_out`, `t_in`, `t_target`, `cop` and `shortfall_k`. |
+| `…_heating_electricity_this_period` | kWh for the current period. Its `forecast` attribute lists every period with `start`, `kwh`, `heat_kwh`, `t_out`, `t_in`, `t_target`, `cop`, `shortfall_k` and, with flow planning, `flow` and `heat_kw`. |
 | `…_heating_electricity_next_24h` | kWh over the next 24 hours |
 | `…_heating_electricity_rest_of_today` | kWh from now until midnight |
 | `…_heating_electricity_tomorrow` | kWh for tomorrow. Its `complete` attribute is `false` if the weather forecast doesn't reach the end of the day. |
 | `…_heating_peak_power_next_24h` | Highest average electrical draw in any period over the next 24 hours, in kW |
+| `…_room_target` | The room temperature the schedule asks for now |
 
 The `forecast` attribute is kept out of the recorder database because it's large.
+
+**Battery planner**: `…_battery_plan`, `…_battery_lowest_soc_next_24h` and `…_battery_next_inverter_update`; see [Battery planner](#battery-planner-optional).
+
+**Flow temperature**
+
+| Entity | Meaning |
+|---|---|
+| `…_flow_target` | The planned flow temperature now (unknown while the plan has the heat pump idle). Attributes: the per-period `plan`, what's been `learned` and where each figure comes from, the outdoor-to-flow `water_law` at the current target, `holds_target_down_to`, the room reading and target in use, the `correction` and its parts, `control` (what Flow control last did), `learn_status` and `weather_note`. |
+| `…_cop_yesterday` | Yesterday's COP (heat out ÷ electricity in). Attributes: the last 7 days and today so far, each with heat, electricity, COP and hours of data. Needs heat output and electricity in. |
+| `switch.…_flow_control` | Off by default. On: the planned flow is written to the heat pump. See [Flow control](#flow-control-off-by-default). |
 
 ## Services
 
@@ -108,6 +143,8 @@ The 1.1 allows for about 10% battery round-trip loss. For a period-by-period pla
 
 All of these can be changed later under **Settings → Devices & services → Heat Load Predictor → Configure**.
 
+With flow temperature planning set up, the integration learns the heat loss, the radiators and the COP from the heat pump's own readings every 6 hours, and the flow plan uses those. The figures below still drive the heating forecast and the battery plan, so it's worth setting them close to what the flow section's `learned` attribute reports.
+
 ### Heat loss (W/K)
 
 This is how many watts the house loses for each degree the inside is warmer than the outside. It matters more than any other setting. There are a few ways to estimate it:
@@ -124,7 +161,7 @@ This is how many watts the house loses for each degree the inside is warmer than
 
 3. **From half-hourly smart meter data (most accurate).** Pair the daily gas use (× boiler efficiency) with each day's mean outdoor temperature, using only days heated by gas alone (no wood burner). Fit a straight line through the points. The slope in kWh per day per K, × 1000 / 24, is the heat loss in W/K. Where the line crosses zero is the house's **balance temperature**, which gives the internal gains (see below).
 
-4. **Once your heat pump is running.** Compare its metered electricity with this integration's forecast over a few weeks and scale the heat loss until they agree.
+4. **Once your heat pump is running.** Set up flow temperature planning with the heat pump's heat output: the learned heat loss appears in the flow sensor's `learned` attribute and on the flow card. Copy it here.
 
 ### Internal gains (W)
 
@@ -219,25 +256,16 @@ Under **Configure → Flow temperature planning**, point the integration at your
 
 - **Plans a flow temperature for every period** from the heat model: the heat each period needs to follow your schedule, turned into a flow temperature with the radiator equation, output = K × (mean water temperature − room)^1.3, plus half the flow-to-return drop at your flow rate. Limited to your lowest and highest flow temperatures, in 0.5 °C steps. Periods where the heat pump can idle show as idle.
 - **Learns your house** from the heat pump's history (5-minute statistics, hourly for older days), every 6 hours: the radiator constant K from steady running, the heat loss from a heat balance over whole days (including losses on the way to the house), and the COP as a function of outdoor and flow temperature.
-- **Learns the curve straight from history** (needs only the flow, room and outdoor temperatures): over each few hours the room's rise or fall is fitted as heating from the flow, minus losses to outside, plus free gains. That gives the flow that holds any room temperature at any outdoor temperature, using what the house actually did, so it takes in the radiators, the pipework and the draughts without needing K or the heat loss right. Once there's about a day of history, this curve is used for the plan (`curve_from: history`); until then the radiator equation above is (`curve_from: settings`). The slope is the weak part: with the flow nearly fixed for days, and a room sensor that reads in 0.5 °C steps, it comes out far too flat. So the history's slope is used only if it's within ×0.67–×1.5 of the slope from the radiator and heat loss figures (learned from the heat meter, or the settings); otherwise that slope is kept and only the level comes from history. `learn_status` says which. The measured flow includes the pump's off-cycles, so the learned flow is the one that, run steadily, delivers the same heat.
+- **Learns the curve straight from history** (needs only the flow, room and outdoor temperatures): over each few hours the room's rise or fall is fitted as heating from the flow, minus losses to outside, plus free gains. That gives the flow that holds any room temperature at any outdoor temperature, using what the house actually did, so it takes in the radiators, the pipework and the draughts without needing K or the heat loss right. Once there's about a day of history, this curve is used for the plan (`curve_from: history`); until then the radiator equation above is (`curve_from: settings`). The slope is the weak part: with the flow nearly fixed for days, and a room sensor that only reports in small, infrequent steps, it comes out far too flat. So the history's slope is used only if it's within ×0.67–×1.5 of the slope from the radiator and heat loss figures (learned from the heat meter, or the settings); otherwise that slope is kept and only the level comes from history. `learn_status` says which. The measured flow includes the pump's off-cycles, so the learned flow is the one that, run steadily, delivers the same heat.
 - **Corrects towards the target:** while Flow control is on, the flow is raised about 2 °C per °C the room is below target, and an integral adds 1 °C of flow per °C per hour while it stays there (limited to ±5 °C, ±6 °C in all). There's a 0.1 °C dead band for the room sensor's steps. It only acts once the target has been steady for two hours, not during scheduled warm-ups or cool-downs (the plan allows for those), and it's zero while the plan is advisory. The flow sensor's `correction_parts` attribute shows the two parts.
 
 `learn_status` says what was learned, or what's missing (for example a sensor without `state_class: measurement` has no history).
 
-`sensor.heat_pump_flow_target` holds the flow temperature for now. Its attributes have the per-period plan (with learned COP and electricity where available), what's been learned and where each figure comes from, the steady-state water law at your target temperature, and the lowest outdoor temperature your highest flow temperature can hold the target at. The card shows each period's planned flow temperature when you hover a bar.
+`sensor.heat_pump_flow_target` holds the flow temperature for now; see [Entities](#entities) for its attributes. The [flow plan card](#the-flow-plan-card) shows the next 24 hours.
 
 ### Daily COP
 
 With heat output and electricity in set, `sensor.heat_pump_cop_yesterday` gives yesterday's COP (heat out ÷ electricity in, from the hourly statistics), with the last 7 days (heat, electricity, COP, hours of data) and today so far in its attributes. Updated every 30 minutes.
-
-### Flow plan card
-
-```yaml
-type: custom:heat-load-flow-card
-hours: 24          # how far ahead
-```
-
-The next hours of the plan: the flow temperature (grey where the heat pump idles) above, and the forecast outdoor temperature, modelled room and target below. Hover for each half-hour's flow, heat, temperatures and COP. The line above the chart gives the flow now, the next change, the range and the idle time.
 
 ### Flow control (off by default)
 
@@ -270,7 +298,8 @@ Within each period the outdoor temperature and heat output are held constant, wh
 
 ### Limits
 
-- **COP depends only on outdoor temperature.** It doesn't change with part load or with the higher flow temperatures used during recovery, so recovery periods are slightly optimistic.
+- **The heating forecast's COP depends only on outdoor temperature.** It doesn't change with part load or with the higher flow temperatures used during recovery, so recovery periods are slightly optimistic. (Flow planning learns COP against flow temperature too, and shows it in the plan, but the electricity forecast and battery plan still use the COP curve.)
+- **The flow curve doesn't vary by time of day.** Mornings, with doors opening and no sun, can need more than the curve gives; the room-temperature correction makes that up while Flow control is on.
 - **Solar gain** is averaged into the internal gains rather than taken from the forecast. Sunny winter days will come in a little under the forecast.
 - **Other heat sources** such as wood burners and electric heaters aren't modelled.
 - **Hot water** isn't included. This forecasts space heating only.
@@ -282,7 +311,7 @@ pip install -r requirements_test.txt
 pytest
 ```
 
-`model.py` has no Home Assistant imports and is tested on its own: energy balance, setbacks, pre-heat and the capacity limit. The integration tests run against a real Home Assistant core and cover the sensors, services, websocket API, config and options flows, schedule persistence, and retry when the weather entity is unavailable.
+`model.py` (the heating forecast), `planner.py` (the battery plan) and `flowlaw.py` (flow temperatures and learning) have no Home Assistant imports and are tested on their own, including replays of real planning-data downloads in `tests/data`. The integration tests run against a real Home Assistant core and recorder and cover the sensors, switch, services, websocket API, config and options flows, learning from statistics, flow control, persistence across restarts and weather outages.
 
 Issues and pull requests are welcome.
 
