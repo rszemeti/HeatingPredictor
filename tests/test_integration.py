@@ -593,8 +593,11 @@ async def test_flow_correction_catches_up(hass: HomeAssistant, fake_weather, fre
             break
         seen.append(f["correction"])
     assert len(seen) >= 3, seen
-    assert seen[0] >= 0.35                      # proportional: ~2 x (0.3 - 0.1 dead band)
+    assert seen[0] >= 0.45                      # proportional: 2 x (0.3 - 0.05 dead band)
     assert seen[-1] > seen[0]                   # integral keeps adding
+    # 5 Nov: 0.2-0.3 °C behind all day built only ~1 °C. Now ~0.75 °C/h at 0.3 °C behind.
+    rate = (seen[-1] - seen[0]) / ((len(seen) - 1) * 0.25)
+    assert rate >= 0.6, (seen, rate)
     # Room back at the target: no proportional push, integral holds.
     hass.states.async_set("sensor.hp_room", str(target), {"unit_of_measurement": "°C"})
     freezer.tick(timedelta(minutes=15))
@@ -713,3 +716,34 @@ async def test_no_forecast_at_all_uses_the_outdoor_sensor(hass: HomeAssistant, f
     assert "held flat" in coord.weather_note
     ts = [r["t_out"] for r in coord.data["periods"]]
     assert len(ts) >= 40 and all(t == pytest.approx(4.0) for t in ts)
+
+
+
+async def test_correction_gains_are_options_and_a_reload_keeps_it(hass: HomeAssistant, fake_weather, freezer) -> None:
+    hass.states.async_set("number.hp_flow_target", "35.0", {"min": 25, "max": 55, "step": 0.5})
+    hass.states.async_set("sensor.hp_room", "20.0", {"unit_of_measurement": "°C"})
+
+    async def set_value(call):
+        hass.states.async_set("number.hp_flow_target", str(call.data["value"]),
+                              {"min": 25, "max": 55, "step": 0.5})
+    hass.services.async_register("number", "set_value", set_value)
+    entry = await _setup(hass, {**OPTIONS, "hp_flow_target_entity": "number.hp_flow_target",
+                                "hp_room_entity": "sensor.hp_room", "correction_i": 6.0})
+    coord = entry.runtime_data
+    target = coord.data["flow"]["target_now"]
+    hass.states.async_set("sensor.hp_room", str(target - 0.25), {"unit_of_measurement": "°C"})
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.heat_pump_flow_control"}, blocking=True)
+    await hass.async_block_till_done()
+    for _ in range(5):
+        freezer.tick(timedelta(minutes=15))
+        await coord.async_refresh()
+    built = coord.data["flow"]["correction_parts"]["integral"]
+    assert built == pytest.approx(6.0 * 0.2 * 1.25, rel=0.1)     # 1.25 h at 0.2 effective
+    # Changing an option reloads straight away: the correction is kept.
+    hass.config_entries.async_update_entry(entry, options={**entry.options, "correction_p": 1.0})
+    await hass.async_block_till_done()
+    c2 = entry.runtime_data
+    assert c2 is not coord
+    await c2.async_refresh()
+    assert c2.data["flow"]["correction_parts"]["integral"] == pytest.approx(built, abs=0.01)
+    assert c2.data["flow"]["correction_parts"]["proportional"] == pytest.approx(0.2, abs=0.01)

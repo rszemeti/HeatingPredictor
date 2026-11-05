@@ -148,14 +148,18 @@
           "emitter_k": "Radiator constant (until learned)",
           "emitter_exponent": "Radiator exponent",
           "hp_learn_days": "Learn from the last",
-          "hp_flow_target_entity": "Heat pump flow target (written by Flow control)"
+          "hp_flow_target_entity": "Heat pump flow target (written by Flow control)",
+          "correction_p": "Correction: flow per °C off target",
+          "correction_i": "Correction: build-up per °C off target per hour"
         },
         "data_description": {
           "hp_heat_entity": "Heat delivered by the heat pump (W or kW). With electricity in, used to learn the real COP.",
           "hp_room_entity": "Used for learning. For the forecast itself, set the indoor temperature sensor in Heating model.",
           "emitter_k": "Radiator output = K x (mean water temperature - room)^n. Learned from the readings once there's enough steady running.",
           "emitter_exponent": "1.3 for radiators, about 1.1 for underfloor heating.",
-          "hp_flow_target_entity": "The number entity that sets the heat pump's flow temperature, e.g. the ESPHome flow target. The heat pump must be on a fixed flow temperature (its own water law off) for this to take effect."
+          "hp_flow_target_entity": "The number entity that sets the heat pump's flow temperature, e.g. the ESPHome flow target. The heat pump must be on a fixed flow temperature (its own water law off) for this to take effect.",
+          "correction_p": "With Flow control on, the flow is raised this much for each °C the room is below target (and lowered when above). 0 turns it off.",
+          "correction_i": "While the room stays off target, the flow is raised by this much more per °C per hour, until it gets there. Higher catches up faster but can overshoot. 0 turns it off."
         }
       }
     },

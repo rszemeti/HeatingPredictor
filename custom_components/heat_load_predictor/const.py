@@ -1,7 +1,7 @@
 """Constants for Heat Load Predictor."""
 
 DOMAIN = "heat_load_predictor"
-VERSION = "0.5.9"
+VERSION = "0.5.10"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR = "indoor_temp_entity"
@@ -100,6 +100,8 @@ CONF_EMITTER_N = "emitter_exponent"
 CONF_EMITTER_K = "emitter_k"             # kW/K^n, used until learned
 CONF_FLOW_LPM = "flow_rate_lpm"          # used if no flow rate sensor
 CONF_HP_LEARN_DAYS = "hp_learn_days"
+CONF_CORR_P = "correction_p"   # °C of flow per °C the room is off target
+CONF_CORR_I = "correction_i"   # °C of flow added per °C off target per hour
 FLOW_DEFAULTS = {
     CONF_FLOW_MIN: 25.0,
     CONF_FLOW_MAX: 55.0,
@@ -107,6 +109,8 @@ FLOW_DEFAULTS = {
     CONF_EMITTER_K: 0.065,
     CONF_FLOW_LPM: 14.5,
     CONF_HP_LEARN_DAYS: 7,
+    CONF_CORR_P: 2.0,
+    CONF_CORR_I: 3.0,
 }
 FLOW_ENTITY_KEYS = (CONF_HP_FLOW, CONF_HP_RETURN, CONF_HP_FLOW_RATE, CONF_HP_HEAT,
                     CONF_HP_POWER, CONF_HP_ROOM, CONF_HP_OUTDOOR, CONF_HP_FLOW_TARGET)

@@ -76,6 +76,8 @@ from .const import (
     CONF_HP_LEARN_DAYS,
     CONF_HP_OUTDOOR,
     CONF_HP_FLOW_TARGET,
+    CONF_CORR_I,
+    CONF_CORR_P,
     FLOW_WRITE_MIN_MINUTES,
     CONF_HP_POWER,
     CONF_HP_RETURN,
@@ -216,15 +218,19 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     pts.append((when, float(v)))
             self._weather_cache, self._weather_cache_at = pts, wat
 
+    async def async_save_state_now(self) -> None:
+        await self._state_store.async_save(self._state_data())
+
+    def _state_data(self) -> dict:
+        return {
+            "correction": self._flow_correction,
+            "correction_at": dt_util.utcnow().isoformat(),
+            "weather": [(t.isoformat(), v) for t, v in self._weather_cache],
+            "weather_at": self._weather_cache_at.isoformat() if self._weather_cache_at else None,
+        }
+
     def _save_state(self) -> None:
-        def data() -> dict:
-            return {
-                "correction": self._flow_correction,
-                "correction_at": dt_util.utcnow().isoformat(),
-                "weather": [(t.isoformat(), v) for t, v in self._weather_cache],
-                "weather_at": self._weather_cache_at.isoformat() if self._weather_cache_at else None,
-            }
-        self._state_store.async_delay_save(data, 60)
+        self._state_store.async_delay_save(self._state_data, 60)
 
     async def async_set_schedule(self, schedule: dict) -> dict:
         cleaned = validate_schedule(schedule)  # raises ValueError
@@ -475,12 +481,13 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         room = self._num(o.get(CONF_HP_ROOM), "°C") or self._indoor_temp()
         now_utc = dt_util.utcnow()
         t_now = target(now_utc)
+        k_p, k_i = float(o[CONF_CORR_P]), float(o[CONF_CORR_I])
         settled = all(abs(target(now_utc - timedelta(minutes=m)) - t_now) < 0.05
                       for m in (30, 60, 90, 120))
         err = 0.0
         if room is not None and settled:
             e = t_now - room
-            err = 0.0 if abs(e) <= 0.1 else e - (0.1 if e > 0 else -0.1)
+            err = 0.0 if abs(e) <= 0.05 else e - (0.05 if e > 0 else -0.05)
         # The integral is zeroed only when Flow control is switched on or off,
         # and saved, so a restart (or a run that can't confirm the pump is
         # following) holds it rather than losing it.
@@ -488,10 +495,10 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             err = 0.0
         elif self._flow_corr_at is not None and err:
             dt_h = min(1.0, (now_utc - self._flow_corr_at).total_seconds() / 3600)
-            self._flow_correction = max(-5.0, min(5.0, self._flow_correction + 1.0 * err * dt_h))
+            self._flow_correction = max(-5.0, min(5.0, self._flow_correction + k_i * err * dt_h))
             self._save_state()
         self._flow_corr_at = now_utc
-        correction = (max(-6.0, min(6.0, self._flow_correction + 2.0 * err))
+        correction = (max(-6.0, min(6.0, self._flow_correction + k_p * err))
                       if self.flow_control else 0.0)
 
         house = self._flow_house
@@ -531,7 +538,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "correction": round(correction, 2),
             "weather_note": self.weather_note,
             "outdoor_now": self.outdoor_now,
-            "correction_parts": {"proportional": round(2.0 * err, 2) if self.flow_control else 0.0,
+            "correction_parts": {"proportional": round(k_p * err, 2) if self.flow_control else 0.0,
                                  "integral": round(self._flow_correction, 2),
                                  "room_error": round(err, 2), "target_steady": settled},
             "emitter_k": round(k, 4),

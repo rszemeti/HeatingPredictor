@@ -161,6 +161,11 @@ async def _async_reload(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # Keep the flow correction over a reload (an options change, say).
+    try:
+        await entry.runtime_data.async_save_state_now()
+    except Exception as err:  # noqa: BLE001 - unloading matters more
+        _LOGGER.debug("Couldn't save state on unload: %s", err)
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 

@@ -40,6 +40,8 @@ from .const import (
     CONF_HP_LEARN_DAYS,
     CONF_HP_OUTDOOR,
     CONF_HP_FLOW_TARGET,
+    CONF_CORR_P,
+    CONF_CORR_I,
     CONF_HP_POWER,
     CONF_HP_RETURN,
     CONF_HP_ROOM,
@@ -326,6 +328,8 @@ def _flow_schema(current: dict[str, Any]) -> vol.Schema:
     fields[vol.Required(CONF_EMITTER_K, default=d[CONF_EMITTER_K])] = _number(0.005, 1, 0.001, "kW/K^n")
     fields[vol.Required(CONF_EMITTER_N, default=d[CONF_EMITTER_N])] = _number(1.0, 1.6, 0.05, "")
     fields[vol.Required(CONF_HP_LEARN_DAYS, default=d[CONF_HP_LEARN_DAYS])] = _number(1, 30, 1, "days")
+    fields[vol.Required(CONF_CORR_P, default=d[CONF_CORR_P])] = _number(0, 10, 0.1, "°C/°C")
+    fields[vol.Required(CONF_CORR_I, default=d[CONF_CORR_I])] = _number(0, 20, 0.1, "°C/°C/h")
     return vol.Schema(fields)
 
 
