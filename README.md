@@ -288,7 +288,7 @@ The switch's `status` attribute (and the flow sensor's `control` attribute) says
 ## When things go missing
 
 - **Weather forecast unavailable** (Met.no has outages): the last good forecast is used for up to 12 hours, so the heating, battery and flow plans carry on. It's saved, so this works across a restart too. Beyond that, or with nothing saved, the heat pump's outdoor sensor (if set) is held flat for the whole forecast: crude, but the plans keep running. The flow sensor's `weather_note` says which is in use.
-- **Restarts:** the flow correction's built-up part is saved and picked up again (if it's under 6 hours old). It's cleared only when Flow control is switched on or off. The Flow control switch remembers its state; what's learned is relearned from history within a minute.
+- **Restarts and pauses:** the flow correction's built-up part is saved and picked up again after a restart (if it's under 6 hours old). Switching Flow control off holds it; switching back on within 6 hours carries on from where it was, and after longer it starts afresh. The Flow control switch remembers its state; what's learned is relearned from history within a minute.
 
 ## How the model works
 

@@ -674,10 +674,22 @@ async def test_flow_correction_survives_a_restart(hass: HomeAssistant, fake_weat
     await c2.async_refresh()
     assert c2.data["flow"]["correction_parts"]["integral"] >= built - 0.01
     assert c2.data["flow"]["correction"] >= built - 0.01
-    # Switching off clears it.
-    await hass.services.async_call("switch", "turn_off", {"entity_id": "switch.heat_pump_flow_control"}, blocking=True)
-    await hass.async_block_till_done()
-    assert c2.data["flow"]["correction_parts"]["integral"] == 0 and c2.data["flow"]["correction"] == 0
+    # Off: nothing applied, but kept. Back on within six hours: carries on (7 Nov).
+    async def toggle(on):
+        await hass.services.async_call("switch", "turn_on" if on else "turn_off",
+                                       {"entity_id": "switch.heat_pump_flow_control"}, blocking=True)
+        await hass.async_block_till_done()
+        await c2.async_refresh()
+    await toggle(False)
+    assert c2.data["flow"]["correction"] == 0
+    freezer.tick(timedelta(minutes=5))
+    await toggle(True)
+    assert c2.data["flow"]["correction_parts"]["integral"] >= built - 0.01
+    # Off for more than six hours: starts afresh.
+    await toggle(False)
+    freezer.tick(timedelta(hours=7))
+    await toggle(True)
+    assert c2.data["flow"]["correction_parts"]["integral"] == 0
 
 
 async def test_entities_have_unique_ids(hass: HomeAssistant, fake_weather, caplog) -> None:

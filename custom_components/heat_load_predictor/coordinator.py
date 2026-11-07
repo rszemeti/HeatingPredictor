@@ -154,6 +154,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._flow_written_at: datetime | None = None
         self._flow_control_status = "off"
         self._flow_following = False   # the pump is on the plan (for the correction)
+        self._flow_off_at: datetime | None = None
         self._flow_corr_at: datetime | None = None
         self._warned_gas: set[str] = set()
 
@@ -488,9 +489,9 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if room is not None and settled:
             e = t_now - room
             err = 0.0 if abs(e) <= 0.05 else e - (0.05 if e > 0 else -0.05)
-        # The integral is zeroed only when Flow control is switched on or off,
-        # and saved, so a restart (or a run that can't confirm the pump is
-        # following) holds it rather than losing it.
+        # The integral is held (and saved) while Flow control is off, over a
+        # restart, or when a run can't confirm the pump is following; it's
+        # cleared only after six hours off.
         if not self.flow_control or not self._flow_following:
             err = 0.0
         elif self._flow_corr_at is not None and err:
@@ -585,9 +586,17 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self._async_write_flow(eid, self.flow_restore_to)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Flow control: couldn't put back %s: %s", eid, err)
-        if on != self.flow_control:
-            self._flow_correction = 0.0          # a fresh start either way
-            self._save_state()
+        # A brief pause keeps the correction; after six hours off it starts
+        # afresh (as after a restart). 7 Nov: off and on for a moment lost it.
+        now = dt_util.utcnow()
+        if not on and self.flow_control:
+            self._flow_off_at = now
+        if on and not self.flow_control:
+            if self._flow_off_at and now - self._flow_off_at > timedelta(hours=6):
+                self._flow_correction = 0.0
+                self._save_state()
+            self._flow_off_at = None
+            self._flow_corr_at = None     # don't count the time it was off
         self.flow_control = on
         if not on:
             self._flow_control_status = "off"
