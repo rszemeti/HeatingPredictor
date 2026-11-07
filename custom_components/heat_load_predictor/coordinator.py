@@ -504,15 +504,9 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         house = self._flow_house
         if house:
             per_h = (results[1].start - results[0].start).total_seconds() / 3600 if len(results) > 1 else 0.5
-            flows = []
-            for r in results:
-                if r.heat_kw < p.idle_kw:
-                    flows.append(None)
-                    continue
-                room_mid = (r.t_in_start + r.t_in_end) / 2
-                f = house.flow(room_mid, r.t_out, (r.t_in_end - r.t_in_start) / per_h)
-                f = min(p.flow_max, max(p.flow_min, f + correction))
-                flows.append(round(f * 2) / 2)
+            flows = flowlaw.plan_house_flows(
+                [(r.t_target, r.t_in_start, r.t_in_end, r.t_out, r.heat_kw) for r in results],
+                house, p, correction, per_h)
         else:
             rows = [(r.heat_kw, (r.t_in_start + r.t_in_end) / 2) for r in results]
             flows = flowlaw.plan_flows(rows, p, correction)

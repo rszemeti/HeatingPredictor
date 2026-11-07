@@ -184,3 +184,31 @@ def test_coarse_room_sensor_keeps_the_heat_meter_slope():
     out = sum(p.out for p in pts_) / len(pts_)
     mean_flow = sum(p.flow for p in pts_) / len(pts_)
     assert hf.flow(room, out) == pytest.approx(mean_flow, abs=1.0)
+
+
+def test_house_flows_run_steadily_not_on_off():
+    """7 Nov: the room read 0.2-0.4 °C over target, the heat model coasted,
+    25 °C was written for two hours, then 42-45 °C to recover."""
+    house = fl.HouseFit(s=1.0, i=0.24, tau=6.75, hours=165, rmse=2.5, mode="anchored")
+    p = fl.FlowParams()
+    steady = house.flow(22.0, 5.0)
+    rows = [
+        (22.0, 22.4, 22.35, 5.0, 0.0),    # a bit warm, model coasting: keep going
+        (22.0, 21.7, 22.0, 5.0, 6.0),     # a bit cold, model recovering hard: no boost
+        (22.0, 22.0, 22.0, 5.0, 2.0),
+    ]
+    out = fl.plan_house_flows(rows, house, p)
+    assert out == [round(steady * 2) / 2] * 3, (out, steady)
+    # The correction does the adjusting.
+    assert fl.plan_house_flows(rows[:1], house, p, correction=-0.8)[0] < out[0]
+
+
+def test_house_flows_idle_after_a_setback_and_boost_a_warm_up():
+    house = fl.HouseFit(s=1.0, i=0.0, tau=6.0, hours=100, rmse=2, mode="fit")
+    p = fl.FlowParams()
+    out = fl.plan_house_flows([
+        (18.0, 21.5, 21.3, 5.0, 0.0),     # night setback, coasting: idle
+        (21.0, 18.5, 19.5, 5.0, 6.0),     # morning warm-up: extra flow
+    ], house, p)
+    assert out[0] is None
+    assert out[1] > house.flow(21.0, 5.0) + 5

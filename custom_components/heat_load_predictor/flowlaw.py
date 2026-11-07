@@ -349,3 +349,30 @@ def model_slope(h_w_per_k: float, gains_kw: float, t_room: float, k: float, n: f
     f_cold = water_law(h_w_per_k, gains_kw, t_room, k, n, flow_lpm, (around - 5,))[0][1]
     f_warm = water_law(h_w_per_k, gains_kw, t_room, k, n, flow_lpm, (around + 5,))[0][1]
     return max(0.1, (f_cold - f_warm) / 10)
+
+
+def plan_house_flows(rows: Sequence[tuple[float, float, float, float, float]], house: HouseFit,
+                     p: FlowParams, correction: float = 0.0, period_h: float = 0.5,
+                     band: float = 0.5) -> list[float | None]:
+    """Flow for each period from the learned curve, at the period's target.
+
+    rows: (target, modelled room at start, modelled room at end, outdoor, heat kW).
+
+    A weather curve, not on/off: a room a little off target is left to the
+    correction (which lowers or raises the flow), so the heat pump runs
+    steadily. Only a real setback (the room `band` or more above the new
+    target, with the heat model coasting) idles it, and only a real warm-up
+    (`band` or more below) gets the extra warm-up flow.
+    7 Nov: idling whenever the room read 0.2 °C high, then 42-45 °C to
+    recover, swung the flow between 25 and 45 °C."""
+    out: list[float | None] = []
+    for target, t_start, t_end, t_out, heat_kw in rows:
+        gap = target - t_start
+        if gap <= -band and heat_kw < p.idle_kw:
+            out.append(None)
+            continue
+        rise = (t_end - t_start) / period_h if gap >= band else 0.0
+        f = house.flow(target, t_out, rise) + correction
+        f = min(p.flow_max, max(p.flow_min, f))
+        out.append(round(f * 2) / 2)
+    return out
