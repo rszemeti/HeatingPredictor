@@ -95,3 +95,56 @@ async def test_learns_house_from_heat_pump_statistics(hass: HomeAssistant, fake_
         assert 1.5 < d["cop"] < 6
     assert float(cop.state) == days[-1]["cop"]
     assert not calls                                   # advisory: nothing written
+
+
+async def test_download_has_what_the_battery_actually_did(hass: HomeAssistant, fake_weather, freezer) -> None:
+    """13 Nov: the download had only the plan forward, nothing of what the
+    battery, solar and storage mode actually did that day."""
+    from pytest_homeassistant_custom_component.components.recorder.common import async_wait_recording_done
+    from .test_integration import BATTERY, _solcast
+
+    start = dt_util.utcnow().replace(second=0, microsecond=0)
+    freezer.move_to(start)
+    hass.states.async_set("sensor.battery_soc", "40", {"unit_of_measurement": "%"})
+    hass.states.async_set("sensor.house_load", "0.5", {"unit_of_measurement": "kW"})
+    hass.states.async_set("sensor.pv_power", "0", {"unit_of_measurement": "W"})
+    hass.states.async_set("select.storage_mode", "Self-Use")
+    _solcast(hass, 4.0)
+    entry = await _setup(hass, {**OPTIONS, **BATTERY, "house_load_entity": "sensor.house_load",
+                                "solar_power_entity": "sensor.pv_power",
+                                "storage_mode_entity": "select.storage_mode"})
+    coord = entry.runtime_data
+    for k, (soc, pv, mode) in enumerate([(45, 2100, "Self-Use"), (55, 3900, "Feed-in priority"),
+                                         (60, 4200, "Feed-in priority"), (66, 2500, "Self-Use")]):
+        freezer.tick(timedelta(minutes=30))
+        hass.states.async_set("sensor.battery_soc", str(soc), {"unit_of_measurement": "%"})
+        hass.states.async_set("sensor.pv_power", str(pv), {"unit_of_measurement": "W"})
+        hass.states.async_set("select.storage_mode", mode)
+        await coord.async_refresh()
+    await async_wait_recording_done(hass)
+    bh = await coord.async_battery_history()
+    s = bh["series"]
+    assert bh["step_minutes"] == 5 and len(s["battery_soc"]) == 48 * 12
+    assert s["battery_soc"][-1] == 66 and 55 in s["battery_soc"]
+    assert s["solar_power"][-1] == 2500
+    assert "Feed-in priority" in s["inverter_mode"] and s["inverter_mode"][-1] == "Self-Use"
+    assert s["house_load"][-1] == 0.5
+    assert set(v for v in s["planned_mode"] if v) <= {"Self-Use", "Feed-in priority"}
+    assert s["planned_mode"][-1] in ("Self-Use", "Feed-in priority")
+    assert bh["entities"]["planned_mode"].endswith("(storage_mode)")
+
+
+async def test_plan_data_download_includes_battery_history(hass: HomeAssistant, fake_weather, hass_ws_client) -> None:
+    from .test_integration import BATTERY, _solcast
+
+    hass.states.async_set("sensor.battery_soc", "40", {"unit_of_measurement": "%"})
+    _solcast(hass, 4.0)
+    await _setup(hass, {**OPTIONS, **BATTERY})
+    client = await hass_ws_client(hass)
+    await client.send_json({"id": 1, "type": "heat_load_predictor/plan_data"})
+    msg = await client.receive_json()
+    assert msg["success"], msg
+    bh = msg["result"]["battery_history"]
+    assert "error" not in bh, bh
+    assert set(bh["series"]) == {"battery_soc", "planned_mode"}
+    assert bh["series"]["battery_soc"][-1] == 40

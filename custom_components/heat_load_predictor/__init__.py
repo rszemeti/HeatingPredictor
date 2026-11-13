@@ -260,6 +260,11 @@ async def ws_plan_data(hass: HomeAssistant, connection: websocket_api.ActiveConn
         connection.send_error(msg["id"], "no_plan", "No plan has been made yet.")
         return
     result = dict(coord.plan_inputs or {"version": VERSION, "made_at": dt_util.now().isoformat()})
+    if coord.plan_inputs and "recorder" in hass.config.components:
+        try:
+            result["battery_history"] = await coord.async_battery_history()
+        except Exception as err:  # noqa: BLE001 - the rest is still useful
+            result["battery_history"] = {"error": str(err)}
     if flow:
         result["flow"] = flow
         result["flow_learned_house"] = coord._flow_house.as_dict() if coord._flow_house else None

@@ -27,6 +27,8 @@ from .const import (
     CONF_SOC_ENTITY,
     CONF_CHEAP_TOLERANCE,
     CONF_HOUSE_LOAD,
+    CONF_SOLAR_POWER,
+    CONF_STORAGE_MODE_ENTITY,
     CONF_HP_SINCE,
     CONF_ROOM_FORECAST,
     CONF_EMITTER_K,
@@ -156,6 +158,8 @@ def _battery_schema(current: dict[str, Any]) -> vol.Schema:
         (CONF_SOLAR_TODAY, {"domain": "sensor"}),
         (CONF_SOLAR_TOMORROW, {"domain": "sensor"}),
         (CONF_HOUSE_LOAD, {"domain": "sensor"}),
+        (CONF_SOLAR_POWER, {"domain": "sensor"}),
+        (CONF_STORAGE_MODE_ENTITY, {"domain": ["select", "sensor", "input_select"]}),
         (CONF_RATES_TODAY, {"domain": "event"}),
         (CONF_RATES_TOMORROW, {"domain": "event"}),
     ):
@@ -335,5 +339,5 @@ def _flow_schema(current: dict[str, Any]) -> vol.Schema:
 
 BATTERY_KEYS = set(BATTERY_DEFAULTS) | {
     CONF_SOC_ENTITY, CONF_SOLAR_TODAY, CONF_SOLAR_TOMORROW, CONF_RATES_TODAY, CONF_RATES_TOMORROW,
-    CONF_HOUSE_LOAD, CONF_HP_SINCE,
+    CONF_HOUSE_LOAD, CONF_HP_SINCE, CONF_SOLAR_POWER, CONF_STORAGE_MODE_ENTITY,
 }

@@ -34,6 +34,8 @@ from .const import (
     CONF_SOC_ENTITY,
     CONF_CHEAP_TOLERANCE,
     CONF_HOUSE_LOAD,
+    CONF_SOLAR_POWER,
+    CONF_STORAGE_MODE_ENTITY,
     CONF_HP_SINCE,
     CONF_LEARN_DAYS,
     CONF_LOAD_MARGIN,
@@ -665,64 +667,103 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "restore_to": self.flow_restore_to,
         }
 
-    async def async_flow_history(self, hours: int = 48, step_min: int = 5) -> dict:
-        """The heat pump's and the room's recent history, on a 5-minute grid
-        (the last value in each step), for "Download planning data"."""
+    async def _async_history(self, ids: dict[str, str], hours: int = 48, step_min: int = 5,
+                             attrs: dict[str, tuple[str, str]] | None = None) -> dict:
+        """Recent history on a 5-minute grid (the value at the end of each
+        step: the last reading so far). Numbers stay numbers; anything else
+        (a mode, say) is kept as text. `attrs` maps a name to (entity,
+        attribute) for values kept in an attribute."""
         from homeassistant.components.recorder import history
-        from homeassistant.helpers import entity_registry as er
         from homeassistant.helpers.recorder import get_instance
 
-        o = self.config_entry.options
-        reg = er.async_get(self.hass)
-        own = {key: reg.async_get_entity_id("sensor", DOMAIN, f"{self.config_entry.entry_id}_{key}")
-               for key in ("flow_target", "room_target")}
-        ids = {
-            "room": o.get(CONF_HP_ROOM) or o.get(CONF_INDOOR),
-            "outdoor": o.get(CONF_HP_OUTDOOR),
-            "flow": o.get(CONF_HP_FLOW), "return": o.get(CONF_HP_RETURN),
-            "flow_rate": o.get(CONF_HP_FLOW_RATE),
-            "heat": o.get(CONF_HP_HEAT), "electricity": o.get(CONF_HP_POWER),
-            "pump_flow_target": o.get(CONF_HP_FLOW_TARGET),
-            "planned_flow": own["flow_target"], "room_target": own["room_target"],
-        }
+        attrs = attrs or {}
         ids = {k: v for k, v in ids.items() if v}
+        attrs = {k: v for k, v in attrs.items() if v[0]}
         end = dt_util.utcnow()
         start = end - timedelta(hours=hours)
 
-        def fetch() -> dict:
-            return history.get_significant_states(
+        def fetch() -> tuple[dict, dict]:
+            plain = history.get_significant_states(
                 self.hass, start, end + timedelta(minutes=1), list(ids.values()),
-                significant_changes_only=False, minimal_response=True, no_attributes=True)
+                significant_changes_only=False, minimal_response=True, no_attributes=True) if ids else {}
+            full = history.get_significant_states(
+                self.hass, start, end + timedelta(minutes=1), list({e for e, _ in attrs.values()}),
+                significant_changes_only=False) if attrs else {}
+            return plain, full
 
-        raw = await get_instance(self.hass).async_add_executor_job(fetch)
-        n = hours * 60 // step_min
-        series: dict[str, list[float | None]] = {}
-        for name, eid in ids.items():
-            changes = []
-            for st in raw.get(eid, []):
+        plain, full = await get_instance(self.hass).async_add_executor_job(fetch)
+
+        def value(v):
+            try:
+                return round(float(v), 3)
+            except (TypeError, ValueError):
+                return None if v in (None, "unknown", "unavailable") else v
+
+        def changes_of(states, attr: str | None = None) -> list:
+            out = []
+            for st in states:
                 if isinstance(st, dict):
-                    val, when = st.get("state"), st.get("last_changed")
+                    val = st.get("state")
+                    when = st.get("last_changed")
                     when = dt_util.parse_datetime(when) if isinstance(when, str) else (
                         dt_util.utc_from_timestamp(st["last_changed_ts"]) if "last_changed_ts" in st else None)
                 else:
-                    val, when = st.state, st.last_changed
-                try:
-                    v = float(val)
-                except (TypeError, ValueError):
-                    v = None
+                    val = st.attributes.get(attr) if attr else st.state
+                    when = st.last_updated if attr else st.last_changed
                 if when is not None:
-                    changes.append((when, v))
-            changes.sort(key=lambda c: c[0])
+                    out.append((when, value(val)))
+            return sorted(out, key=lambda c: c[0])
+
+        n = hours * 60 // step_min
+
+        def grid(changes: list) -> list:
             out, j, cur = [], 0, None
             for i in range(n):
                 t = start + timedelta(minutes=step_min * (i + 1))
                 while j < len(changes) and changes[j][0] <= t:
                     cur = changes[j][1]
                     j += 1
-                out.append(None if cur is None else round(cur, 3))
-            series[name] = out
-        return {"start": start.isoformat(), "step_minutes": step_min, "entities": ids,
+                out.append(cur)
+            return out
+
+        series = {name: grid(changes_of(plain.get(eid, []))) for name, eid in ids.items()}
+        for name, (eid, attr) in attrs.items():
+            series[name] = grid(changes_of(full.get(eid, []), attr))
+        entities = {**ids, **{k: f"{e} ({a})" for k, (e, a) in attrs.items()}}
+        return {"start": start.isoformat(), "step_minutes": step_min, "entities": entities,
                 "note": "value at the end of each step (last reading so far)", "series": series}
+
+    def _own_entity(self, platform: str, key: str) -> str | None:
+        from homeassistant.helpers import entity_registry as er
+        return er.async_get(self.hass).async_get_entity_id(
+            platform, DOMAIN, f"{self.config_entry.entry_id}_{key}")
+
+    async def async_flow_history(self, hours: int = 48, step_min: int = 5) -> dict:
+        """The heat pump's and the room's recent history, for the download."""
+        o = self.config_entry.options
+        return await self._async_history({
+            "room": o.get(CONF_HP_ROOM) or o.get(CONF_INDOOR),
+            "outdoor": o.get(CONF_HP_OUTDOOR),
+            "flow": o.get(CONF_HP_FLOW), "return": o.get(CONF_HP_RETURN),
+            "flow_rate": o.get(CONF_HP_FLOW_RATE),
+            "heat": o.get(CONF_HP_HEAT), "electricity": o.get(CONF_HP_POWER),
+            "pump_flow_target": o.get(CONF_HP_FLOW_TARGET),
+            "planned_flow": self._own_entity("sensor", "flow_target"),
+            "room_target": self._own_entity("sensor", "room_target"),
+        }, hours, step_min)
+
+    async def async_battery_history(self, hours: int = 48, step_min: int = 5) -> dict:
+        """What the battery, solar and house actually did, and the storage mode
+        planned and set, for the download."""
+        o = self.config_entry.options
+        return await self._async_history({
+            "battery_soc": o.get(CONF_SOC_ENTITY),
+            "house_load": o.get(CONF_HOUSE_LOAD),
+            "solar_power": o.get(CONF_SOLAR_POWER),
+            "inverter_mode": o.get(CONF_STORAGE_MODE_ENTITY),
+        }, hours, step_min, attrs={
+            "planned_mode": (self._own_entity("sensor", "battery_plan"), "storage_mode"),
+        })
 
     async def _async_maybe_daily_cop(self) -> None:
         """Heat out, electricity in and COP for each of the last 7 days and

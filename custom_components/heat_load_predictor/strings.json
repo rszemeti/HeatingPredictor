@@ -105,7 +105,9 @@
           "learn_days": "Learn from the last",
           "heat_pump_since": "Heat pump in use since",
           "charge_strategy": "Cheap window charging",
-          "room_forecast": "Room for the solar peak sized on"
+          "room_forecast": "Room for the solar peak sized on",
+          "solar_power_entity": "Solar power",
+          "storage_mode_entity": "Inverter storage mode"
         },
         "data_description": {
           "battery_soc_entity": "A sensor reporting the battery's state of charge in %.",
@@ -128,7 +130,9 @@
           "learn_days": "How many days of house load history to learn from (5-minute history is usually kept for 10 days; older days use hourly averages).",
           "heat_pump_since": "When the heat pump started heating the house. Before this the house load is taken as the baseload as it is; from this point the heat model's heat pump use is subtracted. Leave empty if it has been running throughout the learning period.",
           "charge_strategy": "Fill: charge every cheap window as far as the next day's solar allows, so a bad forecast can't leave you buying at full price. Minimum: charge only what the forecast says gets you to the next cheap window above the reserve.",
-          "room_forecast": "Expected: Self-Use for as long as the median forecast allows, Feed-in priority only through the peak; the plan reruns every 15 minutes, so a sunnier day switches to Feed-in in time. Optimistic: keeps room for Solcast's 90th-percentile day, which exports more on an ordinary day and may then buy it back in a cheap window."
+          "room_forecast": "Expected: Self-Use for as long as the median forecast allows, Feed-in priority only through the peak; the plan reruns every 15 minutes, so a sunnier day switches to Feed-in in time. Optimistic: keeps room for Solcast's 90th-percentile day, which exports more on an ordinary day and may then buy it back in a cheap window.",
+          "solar_power_entity": "Optional: the inverter's solar (PV) power. Only used in Download planning data, to compare the real solar with the forecast.",
+          "storage_mode_entity": "Optional: the entity showing the inverter's storage mode (for example Self-Use or Feed-in priority). Only used in Download planning data, to compare with the planned mode."
         }
       },
       "flow": {
