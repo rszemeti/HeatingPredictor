@@ -683,3 +683,20 @@ def test_real_self_use_morning_no_afternoon_buy():
     assert feed and min(feed).hour >= 10 and max(feed).hour <= 13, feed
     soc = {t.astimezone(LON).strftime("%H:%M"): v for t, v in plan.soc if t.astimezone(LON).day == 29}
     assert soc["11:30"] > soc["08:30"] + 5           # the morning solar is stored
+
+
+def test_feed_in_only_while_solar_beats_the_export_limit():
+    """13 Nov: Feed-in priority from the morning, when the solar was under
+    5 kW plus the house, exported what the battery could have kept; the sun
+    under-delivered and the battery ended in the 80s. Feed-in now only in
+    half-hours where the solar exceeds the export limit plus the house."""
+    params = pl.BatteryParams(discharge_threshold_soc=0, fill_cheap_windows=False)
+    lim = params.export_limit_kw * 0.5
+    for peak, soc in ((9.0, 40), (9.0, 75), (5.0, 85)):
+        start = datetime(2026, 6, 15, 0, tzinfo=LON)
+        plan, starts, load, pv = plan_for(start, heat_kw=0.0, pv_peak=peak, soc=soc, params=params)
+        feed = [i for i, (_, m) in enumerate(plan.modes) if m == "Feed-in priority"]
+        assert all(pv[i] - load[i] > lim for i in feed), (peak, soc, [(pv[i] - load[i]) for i in feed])
+        if peak == 5.0:
+            # Never above the limit: a full battery just exports; nothing to gain.
+            assert not feed

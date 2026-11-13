@@ -323,8 +323,12 @@ def make_plan(
             charging = actions[i] is not None and actions[i][0] == "charge"
             spare = pv_kwh[i] - load_kwh[i]
             free_if_stored = cap - min(cap, s / 100 * cap + max(0.0, spare))
-            # Feed-in priority only matters with spare solar; otherwise Self-Use.
-            feed_in = (not charging and spare > 0
+            # Feed-in priority only while the solar beats the export limit plus
+            # the house (the only time Self-Use could lose any), and only if
+            # the battery would otherwise fill. Below the limit it would just
+            # export solar the battery could have kept. 13 Nov: Feed-in from
+            # the morning, the sun under-delivered, and it ended in the 80s.
+            feed_in = (not charging and spare > params.export_limit_kw * dt_h
                        and free_if_stored < room_after[i] - CLIP_TOLERANCE_KWH)
             modes[i] = "Feed-in priority" if feed_in else "Self-Use"
             nxt = _step(s, actions[i], pv_kwh[i], load_kwh[i], dt_h, params, feed_in)
