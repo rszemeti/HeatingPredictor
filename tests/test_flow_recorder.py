@@ -148,3 +148,40 @@ async def test_plan_data_download_includes_battery_history(hass: HomeAssistant, 
     assert "error" not in bh, bh
     assert set(bh["series"]) == {"battery_soc", "planned_mode"}
     assert bh["series"]["battery_soc"][-1] == 40
+
+
+async def test_daily_costs_include_today_so_far(hass: HomeAssistant, fake_weather, freezer) -> None:
+    """With the grid energy totals set, today counts what's already been
+    imported and exported, at each half-hour's price."""
+    from pytest_homeassistant_custom_component.components.recorder.common import async_wait_recording_done
+    from .test_integration import BATTERY, _solcast
+
+    midnight = dt_util.start_of_local_day()
+    freezer.move_to(midnight + timedelta(minutes=1))
+    hass.states.async_set("sensor.battery_soc", "60", {"unit_of_measurement": "%"})
+    _solcast(hass, 0.0)
+    rates = [{"start": midnight + timedelta(minutes=30 * i), "end": midnight + timedelta(minutes=30 * i + 30),
+              "value_inc_vat": 0.20 if i < 12 else 0.30} for i in range(96)]
+    hass.states.async_set("event.import_today", "1", {"rates": rates})
+    hass.states.async_set("sensor.grid_in", "100.0", {"unit_of_measurement": "kWh"})
+    hass.states.async_set("sensor.grid_out", "50.0", {"unit_of_measurement": "kWh"})
+    await async_wait_recording_done(hass)
+    # Overnight (20p): 2 kWh in; after 06:00 (30p): 1 kWh in, 0.5 kWh out.
+    freezer.move_to(midnight + timedelta(hours=3))
+    hass.states.async_set("sensor.grid_in", "102.0", {"unit_of_measurement": "kWh"})
+    await async_wait_recording_done(hass)
+    freezer.move_to(midnight + timedelta(hours=7))
+    hass.states.async_set("sensor.grid_in", "103.0", {"unit_of_measurement": "kWh"})
+    hass.states.async_set("sensor.grid_out", "50.5", {"unit_of_measurement": "kWh"})
+    await async_wait_recording_done(hass)
+    freezer.move_to(midnight + timedelta(hours=7, minutes=10))
+    entry = await _setup(hass, {**OPTIONS, **BATTERY, "rates_today_entity": "event.import_today",
+                                "grid_import_energy_entity": "sensor.grid_in",
+                                "grid_export_energy_entity": "sensor.grid_out"})
+    actual = entry.runtime_data._grid_today
+    assert actual["import_kwh"] == pytest.approx(3.0)
+    assert actual["import_money"] == pytest.approx(2 * 0.20 + 1 * 0.30)
+    assert actual["export_kwh"] == pytest.approx(0.5)
+    today = hass.states.get("sensor.heat_pump_battery_plan").attributes["days"][0]
+    assert today["import_kwh"] >= 3.0 and today["import_cost"] >= 0.7
+    assert today["complete"] is False                     # no export prices for its 0.5 kWh

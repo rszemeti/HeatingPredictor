@@ -42,6 +42,8 @@ from .const import (
     CONF_CHARGE_STRATEGY,
     CONF_RATES_TODAY,
     CONF_EXPORT_RATES_TODAY,
+    CONF_GRID_IMPORT_ENERGY,
+    CONF_GRID_EXPORT_ENERGY,
     CONF_EXPORT_RATES_TOMORROW,
     CONF_EXPORT_MARGIN,
     CONF_ROUND_TRIP,
@@ -135,6 +137,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._weather_cache: list[tuple[datetime, float]] = []
         self._weather_cache_at: datetime | None = None
         self.weather_note: str | None = None
+        self._grid_today: dict | None = None
         self.outdoor_now: dict | None = None
         self.schedule: dict = default_schedule()
         # Modelled indoor temperature from the last run, (UTC time, °C), used
@@ -443,8 +446,53 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._async_maybe_learn()
         o = self.config_entry.options
         if o.get(CONF_BATTERY_ENABLED):
+            await self._async_grid_today()
             data["battery"] = self._plan_battery(results, now_local)
         return data
+
+    async def _async_grid_today(self) -> None:
+        """Today's actual grid import and export so far, and what they cost
+        and earned at each half-hour's price, from the grid energy totals
+        (their recorded readings, on a 5-minute grid)."""
+        o = self.config_entry.options
+        ids = {"import": o.get(CONF_GRID_IMPORT_ENERGY), "export": o.get(CONF_GRID_EXPORT_ENERGY)}
+        ids = {k: v for k, v in ids.items() if v}
+        self._grid_today = None
+        if not ids or "recorder" not in self.hass.config.components:
+            return
+        try:
+            h = await self._async_history(ids, hours=25, step_min=5)
+        except Exception as err:  # noqa: BLE001 - the plan matters more
+            _LOGGER.debug("No grid energy history: %s", err)
+            return
+        midnight = dt_util.as_utc(dt_util.start_of_local_day())
+        t0 = dt_util.parse_datetime(h["start"])
+        step = timedelta(minutes=h["step_minutes"])
+        prices = {"import": self._rates(),
+                  "export": self._rates((CONF_EXPORT_RATES_TODAY, CONF_EXPORT_RATES_TOMORROW))}
+        out: dict[str, Any] = {"upto": None}
+        for k in ids:
+            vals = h["series"][k]
+            kwh = cost = 0.0
+            priced = True
+            for j in range(1, len(vals)):
+                a_, b_ = vals[j - 1], vals[j]
+                start = t0 + step * j                  # this step runs start..start+step
+                if start < midnight or not isinstance(a_, (int, float)) or not isinstance(b_, (int, float)):
+                    continue
+                ch = b_ - a_
+                if ch <= 0:                            # no change, or the total reset
+                    continue
+                price = next((p_ for s_, e_, p_ in prices[k]
+                              if dt_util.as_utc(s_) <= start < dt_util.as_utc(e_)), None)
+                kwh += ch
+                if price is None:
+                    priced = False
+                else:
+                    cost += ch * price
+            out[f"{k}_kwh"], out[f"{k}_money"] = kwh, (cost if priced else None)
+        out["upto"] = dt_util.utcnow()
+        self._grid_today = out
 
     # ---------------------------------------------------------------- flow
 
@@ -1122,6 +1170,68 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return [prof[slot_of(t)] * dt_h for t in starts], f"learned from {days:.1f} days"
         return [float(o[CONF_BASELOAD]) * dt_h for _ in starts], f"fixed {float(o[CONF_BASELOAD]):.2f} kW"
 
+    def _daily_money(self, plan, starts, price_in, price_out, now_local) -> list[dict]:
+        """Per local day: grid import (kWh, £), export (kWh, £) and the net
+        (export income less import cost; standing charges left out). Today
+        is actual so far (if the grid energy totals are set) plus the plan
+        for the rest. `complete` is false where a price or the forecast is
+        missing for part of the day."""
+        dt = timedelta(minutes=self.period)
+        now_u = dt_util.utcnow()
+        day_periods = int(24 * 60 / self.period)
+        by: dict = {}
+        for i, ((t, gi), (_, go)) in enumerate(zip(plan.grid_import, plan.grid_export)):
+            lt = dt_util.as_local(t)
+            d = by.setdefault(lt.date(), {"import_kwh": 0.0, "import_cost": 0.0, "export_kwh": 0.0,
+                                          "export_income": 0.0, "periods": 0, "priced": True})
+            # The current period has partly gone: count only what's left.
+            frac = 1.0
+            if t < now_u:
+                frac = max(0.0, min(1.0, ((t + dt) - now_u) / dt))
+            gi, go = gi * frac, go * frac
+            d["import_kwh"] += gi
+            d["export_kwh"] += go
+            d["periods"] += 1
+            pi = price_in[i] if price_in else None
+            po = price_out[i] if price_out else None
+            if pi is None and gi > 0.001:
+                d["priced"] = False
+            if po is None and go > 0.001 and self.config_entry.options.get(CONF_EXPORT_RATES_TODAY):
+                d["priced"] = False
+            d["import_cost"] += gi * (pi or 0.0)
+            d["export_income"] += go * (po or 0.0)
+        today = now_local.date()
+        actual = getattr(self, "_grid_today", None)
+        out = []
+        for day in sorted(by):
+            d = by[day]
+            first_local = dt_util.start_of_local_day(day)
+            complete = d["priced"] and (d["periods"] >= day_periods or (
+                day == today and actual is not None))
+            if day == today and actual is not None:
+                for k, money in (("import", "import_cost"), ("export", "export_income")):
+                    if actual.get(f"{k}_kwh") is not None:
+                        d[f"{k}_kwh"] += actual[f"{k}_kwh"]
+                        if actual.get(f"{k}_money") is None:
+                            complete = False
+                        else:
+                            d[money] += actual[f"{k}_money"]
+            elif day == today:
+                complete = False                 # only from now on
+            out.append({
+                "date": day.isoformat(),
+                "import_kwh": round(d["import_kwh"], 2),
+                "import_cost": round(d["import_cost"], 2),
+                "export_kwh": round(d["export_kwh"], 2),
+                "export_income": round(d["export_income"], 2),
+                "net": round(d["export_income"] - d["import_cost"], 2),
+                "complete": bool(complete),
+                "actual_until": actual["upto"].isoformat() if day == today and actual and actual.get("upto") else None,
+                "from": None if day != today or actual else now_local.isoformat(),
+                "starts": first_local.isoformat(),
+            })
+        return out
+
     def _rates(self, keys=(CONF_RATES_TODAY, CONF_RATES_TOMORROW)) -> list[tuple[datetime, datetime, float]]:
         """(start, end, price) periods from Octopus Energy rate event entities."""
         out: list[tuple[datetime, datetime, float]] = []
@@ -1220,21 +1330,21 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             export_margin=float(o.get(CONF_EXPORT_MARGIN, 3.0)) / 100,
             round_trip_efficiency=float(o.get(CONF_ROUND_TRIP, 90)) / 100,
         )
-        # Each period's prices (£/kWh), for selling from the battery: only
-        # with an export tariff set.
+        # Each period's prices (£/kWh): for the daily costs, and (with an
+        # export tariff) for selling from the battery.
+        def per_period(rates):
+            out = []
+            for t in starts:
+                tu = dt_util.as_utc(t)
+                out.append(next((p_ for a_, b_, p_ in rates
+                                 if dt_util.as_utc(a_) <= tu < dt_util.as_utc(b_)), None))
+            return out
+        price_in = per_period(self._rates())
+        price_out = per_period(self._rates((CONF_EXPORT_RATES_TODAY, CONF_EXPORT_RATES_TOMORROW))) \
+            if o.get(CONF_EXPORT_RATES_TODAY) else [None] * len(starts)
         import_price = export_price = None
-        if o.get(CONF_EXPORT_RATES_TODAY):
-            def per_period(rates):
-                out = []
-                for t in starts:
-                    tu = dt_util.as_utc(t)
-                    out.append(next((p_ for a_, b_, p_ in rates
-                                     if dt_util.as_utc(a_) <= tu < dt_util.as_utc(b_)), None))
-                return out
-            export_price = per_period(self._rates((CONF_EXPORT_RATES_TODAY, CONF_EXPORT_RATES_TOMORROW)))
-            import_price = per_period(self._rates())
-            if not any(v is not None for v in export_price) or not any(v is not None for v in import_price):
-                import_price = export_price = None
+        if any(v is not None for v in price_out) and any(v is not None for v in price_in):
+            import_price, export_price = price_in, price_out
         plan = make_plan(
             starts=starts,
             period_minutes=self.period,
@@ -1283,6 +1393,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "clipped": [(t.isoformat(), round(c, 3)) for t, c in plan.clipped],
             },
         }
+        days = self._daily_money(plan, starts, price_in, price_out, now_local)
         # The plan is in UTC; from here on, times are for people: local.
         tz = now_local.tzinfo
         windows = [w.as_dict(tz) for w in plan.windows if w.end > now_local]
@@ -1332,6 +1443,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "clipping_24h_kwh": round(clip_24h, 2),
             "soc_now": soc_now,
             "solar_forecast": solar_ok,
+            "days": days,
             "windows": windows,
             "slots": slots_next,
             "next": nxt,

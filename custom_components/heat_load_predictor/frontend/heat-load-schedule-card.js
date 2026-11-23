@@ -222,6 +222,13 @@ class HeatLoadScheduleCard extends HTMLElement {
         button.primary { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: var(--primary-color); }
         button:disabled { opacity: .5; cursor: default; }
         .tab small { opacity: .7; margin-left: 3px; }
+        .tab .pl { display: block; font-size: .75em; opacity: .85; }
+        .tab .pl.part { opacity: .6; text-decoration: underline dotted; }
+        .gain { color: var(--success-color, #43a047); }
+        .loss { color: var(--error-color, #db4437); }
+        button.on .gain, button.on .loss { color: inherit; }
+        .money { font-size: .85em; color: var(--secondary-text-color); margin: -4px 0 8px; }
+        .money b { color: var(--primary-text-color); font-weight: 500; }
         svg { width: 100%; height: auto; display: block; touch-action: none; user-select: none; }
         .grid line { stroke: var(--divider-color, #ddd); stroke-width: 1; }
         .axis text { fill: var(--secondary-text-color, #666); font-size: 11px; }
@@ -275,6 +282,7 @@ class HeatLoadScheduleCard extends HTMLElement {
       <ha-card>
         <div class="head"><div class="title"></div><div class="interp"></div></div>
         <div class="tabs"></div>
+        <div class="money"></div>
         <div class="wrap"><svg viewBox="0 0 ${W} ${H}"></svg><div class="tip"></div></div>
         <div class="legend">
           <span><span class="sw" style="border-top:3px solid var(--primary-color,#03a9f4)"></span>Target</span>
@@ -325,10 +333,23 @@ class HeatLoadScheduleCard extends HTMLElement {
     const dates = this._datesByWeekday();
     // Tabs run from today: today, tomorrow, ... six days on.
     const first = (new Date().getDay() + 6) % 7;
+    // Forecast grid money per day (battery planner): net = export income
+    // less import cost, standing charges not included.
+    const money = {};
+    for (const d of (this._battery && this._battery.days) || []) money[d.date] = d;
+    const gbp = (v) => `${v < 0 ? "−" : "+"}£${Math.abs(v).toFixed(2)}`;
+    const note = (d) => d.complete ? "" : (d.from ? " (rest of today only)" : " (part of the day: a price or the forecast is missing)");
     r.querySelector(".tabs").innerHTML = [0, 1, 2, 3, 4, 5, 6].map((k) => {
       const i = (first + k) % 7, n = DAY_NAMES[i];
-      return `<button class="tab ${i === this._day ? "on" : ""}" data-day="${i}">${n}${dates[i] ? `<small>${Number(dates[i].slice(8))}</small>` : ""}</button>`;
+      const m = dates[i] ? money[dates[i]] : null;
+      const pl = m ? `<span class="pl ${m.net >= 0 ? "gain" : "loss"}${m.complete ? "" : " part"}">${gbp(m.net)}</span>` : "";
+      const tip = m ? ` title="Import ${m.import_kwh} kWh, £${m.import_cost.toFixed(2)} · export ${m.export_kwh} kWh, £${m.export_income.toFixed(2)}${note(m)}"` : "";
+      return `<button class="tab ${i === this._day ? "on" : ""}" data-day="${i}"${tip}>${n}${dates[i] ? `<small>${Number(dates[i].slice(8))}</small>` : ""}${pl}</button>`;
     }).join("");
+    const sel = dates[this._day] ? money[dates[this._day]] : null;
+    r.querySelector(".money").innerHTML = sel
+      ? `Grid: import ${sel.import_kwh} kWh <b>£${sel.import_cost.toFixed(2)}</b> · export ${sel.export_kwh} kWh <b>£${sel.export_income.toFixed(2)}</b> · net <b class="${sel.net >= 0 ? "gain" : "loss"}">${gbp(sel.net)}</b>${note(sel)}. Standing charges not included.`
+      : "";
     r.querySelectorAll("[data-day]").forEach((b) => (b.onclick = () => { this._day = Number(b.dataset.day); this._render(); }));
 
     r.querySelector(".copy").innerHTML = `<span class="hint">Copy ${DAY_NAMES[this._day]} to:</span>

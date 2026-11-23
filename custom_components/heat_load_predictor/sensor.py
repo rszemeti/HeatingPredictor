@@ -159,7 +159,7 @@ class _BatteryBase(CoordinatorEntity[HeatLoadCoordinator], SensorEntity):
 class BatteryPlanSensor(_BatteryBase):
     """The battery plan: summary as state, full plan in attributes."""
 
-    _unrecorded_attributes = frozenset({"windows", "slots", "soc_forecast", "next", "baseload_profile"})
+    _unrecorded_attributes = frozenset({"windows", "slots", "soc_forecast", "next", "baseload_profile", "days"})
 
     def __init__(self, coordinator: HeatLoadCoordinator) -> None:
         super().__init__(coordinator, "battery_plan")
@@ -177,7 +177,7 @@ class BatteryPlanSensor(_BatteryBase):
         return {k: plan[k] for k in (
             "soc_now", "solar_forecast", "storage_mode", "self_use_from", "clipping_today_kwh", "clipping_24h_kwh",
             "charge_windows_from", "baseload_from", "baseload_profile",
-            "next", "slots", "windows", "soc_forecast")}
+            "next", "slots", "windows", "soc_forecast", "days") if k in plan}
 
 
 class BatteryMinSocSensor(_BatteryBase):

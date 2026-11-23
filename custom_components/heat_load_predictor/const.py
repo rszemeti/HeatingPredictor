@@ -1,7 +1,7 @@
 """Constants for Heat Load Predictor."""
 
 DOMAIN = "heat_load_predictor"
-VERSION = "0.5.14"
+VERSION = "0.5.15"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR = "indoor_temp_entity"
@@ -79,6 +79,9 @@ CONF_EXPORT_RATES_TODAY = "export_rates_today_entity"
 CONF_EXPORT_RATES_TOMORROW = "export_rates_tomorrow_entity"
 CONF_EXPORT_MARGIN = "export_margin_p"        # p/kWh over the charge cost
 CONF_ROUND_TRIP = "round_trip_efficiency_pct"
+# Grid energy totals (kWh, increasing): today's actual import and export, for the daily costs.
+CONF_GRID_IMPORT_ENERGY = "grid_import_energy_entity"
+CONF_GRID_EXPORT_ENERGY = "grid_export_energy_entity"
 BATTERY_DEFAULTS[CONF_EXPORT_MARGIN] = 3.0
 BATTERY_DEFAULTS[CONF_ROUND_TRIP] = 90
 CONF_CHEAP_TOLERANCE = "cheap_tolerance_pct"

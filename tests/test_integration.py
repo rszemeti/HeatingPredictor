@@ -835,3 +835,31 @@ async def test_correction_halves_when_the_room_crosses_the_target(hass: HomeAssi
     freezer.tick(timedelta(minutes=15))         # staying over: normal unwinding only
     await coord.async_refresh()
     assert coord.data["flow"]["correction_parts"]["integral"] == pytest.approx(after - 3.0 * 0.25 * 0.25, abs=0.05)
+
+
+async def test_daily_costs_from_the_plan(hass: HomeAssistant, fake_weather, freezer) -> None:
+    """23 Nov: each day's forecast import cost, export income and net."""
+    freezer.move_to(dt_util.start_of_local_day() + timedelta(hours=11))
+    hass.states.async_set("sensor.battery_soc", "60", {"unit_of_measurement": "%"})
+    _solcast(hass, 0.0)
+    day = dt_util.start_of_local_day()
+
+    def rates(price_of):
+        return [{"start": day + timedelta(days=d, minutes=30 * i),
+                 "end": day + timedelta(days=d, minutes=30 * i + 30),
+                 "value_inc_vat": price_of((30 * i) / 60)} for d in (0, 1, 2) for i in range(48)]
+    cheap = lambda h: 4 <= h < 7 or 13 <= h < 16 or 22 <= h < 24  # noqa: E731
+    hass.states.async_set("event.import_today", "1", {"rates": rates(lambda h: 0.13 if cheap(h) else 0.30)})
+    hass.states.async_set("event.export_today", "1", {"rates": rates(lambda h: 0.30 if 16 <= h < 19 else 0.08)})
+    await _setup(hass, {**OPTIONS, **BATTERY, "rates_today_entity": "event.import_today",
+                        "export_rates_today_entity": "event.export_today"})
+    days = hass.states.get("sensor.heat_pump_battery_plan").attributes["days"]
+    today, tomorrow = days[0], days[1]
+    assert today["date"] == day.date().isoformat() and not today["complete"]   # from now only
+    assert tomorrow["complete"]
+    for d in days:
+        assert d["net"] == pytest.approx(d["export_income"] - d["import_cost"], abs=0.011)
+        assert d["import_cost"] >= 0 and d["export_income"] >= 0
+    # Tomorrow buys in the cheap windows and sells at the peak.
+    assert tomorrow["import_kwh"] > 5 and tomorrow["export_kwh"] > 5
+    assert tomorrow["import_cost"] == pytest.approx(tomorrow["import_kwh"] * 0.13, rel=0.25)

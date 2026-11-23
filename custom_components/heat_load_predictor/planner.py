@@ -222,6 +222,9 @@ class Plan:
     # Solar expected to be lost (kWh) in each period: above the export limit
     # with the battery full. Non-zero only when clipping can't be avoided.
     clipped: list[tuple[datetime, float]] = field(default_factory=list)
+    # Grid import and export (kWh) expected in each period.
+    grid_import: list[tuple[datetime, float]] = field(default_factory=list)
+    grid_export: list[tuple[datetime, float]] = field(default_factory=list)
 
 
 def make_plan(
@@ -325,6 +328,8 @@ def make_plan(
 
     modes: list[str] = ["Self-Use"] * n
     clipped: list[float] = [0.0] * n
+    grid_in: list[float] = [0.0] * n
+    grid_out: list[float] = [0.0] * n
 
     def simulate(upto: int) -> list[float]:
         """SOC at the start of each period 0..upto (inclusive)."""
@@ -346,6 +351,11 @@ def make_plan(
             stored = max(0.0, nxt - s) / 100 * cap
             clipped[i] = max(0.0, spare - stored - params.export_limit_kw * dt_h) \
                 if spare > 0 and (actions[i] is None or actions[i][0] != "discharge") else 0.0
+            # What the grid supplies or takes: the house's shortfall plus any
+            # charging, less discharging; exports capped at the limit.
+            net = load_kwh[i] - pv_kwh[i] + (nxt - s) / 100 * cap
+            grid_in[i] = max(0.0, net)
+            grid_out[i] = min(params.export_limit_kw * dt_h, max(0.0, -net))
             s = nxt
             soc.append(s)
         return soc
@@ -567,6 +577,8 @@ def make_plan(
         soc=[(starts[i] + dt, soc[i + 1]) for i in range(n)],
         modes=list(zip(starts, modes)),
         clipped=list(zip(starts, clipped)),
+        grid_import=list(zip(starts, grid_in)),
+        grid_export=list(zip(starts, grid_out)),
     )
 
 

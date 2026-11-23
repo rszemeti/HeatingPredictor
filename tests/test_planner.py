@@ -742,3 +742,18 @@ def test_no_export_prices_no_change():
               soc_now=60, params=pl.BatteryParams(), charge_windows=COSY, discharge_windows=NIGHT)
     a, b = pl.make_plan(**kw), pl.make_plan(**kw, import_price=[0.13] * len(starts))
     assert [w.as_dict() for w in a.windows] == [w.as_dict() for w in b.windows]
+
+
+def test_grid_flows_balance():
+    """Each period: house + charging = solar + grid import + discharging, and
+    exports never beat the limit (plan's grid flows, for the daily costs)."""
+    start = datetime(2026, 6, 15, 0, tzinfo=LON)
+    params = pl.BatteryParams(discharge_threshold_soc=0)
+    plan, starts, load, pv = plan_for(start, heat_kw=0.3, pv_peak=9.0, soc=50, params=params)
+    soc = [50.0] + [v for _, v in plan.soc]
+    lim = params.export_limit_kw * 0.5
+    for i, ((_, gi), (_, go)) in enumerate(zip(plan.grid_import, plan.grid_export)):
+        batt_in = (soc[i + 1] - soc[i]) / 100 * params.capacity_kwh
+        clipped = plan.clipped[i][1]
+        assert gi >= 0 and 0 <= go <= lim + 1e-9
+        assert load[i] + batt_in + go + clipped == pytest.approx(pv[i] + gi, abs=1e-6), i

@@ -111,7 +111,9 @@
           "export_rates_today_entity": "Export rates today",
           "export_rates_tomorrow_entity": "Export rates tomorrow",
           "export_margin_p": "Sell only with this margin",
-          "round_trip_efficiency_pct": "Battery round-trip efficiency"
+          "round_trip_efficiency_pct": "Battery round-trip efficiency",
+          "grid_import_energy_entity": "Grid import energy",
+          "grid_export_energy_entity": "Grid export energy"
         },
         "data_description": {
           "battery_soc_entity": "A sensor reporting the battery's state of charge in %.",
@@ -140,7 +142,9 @@
           "export_rates_today_entity": "Optional: the Octopus Energy export rates event for today (e.g. Agile Outgoing: …_export_current_day_rates). With it, the battery sells what's surplus to reaching the next cheap window at the reserve, when the export pays.",
           "export_rates_tomorrow_entity": "The export rates event for tomorrow (…_export_next_day_rates).",
           "export_margin_p": "Sell from the battery only when the export price beats the cheap window's price, divided by the round-trip efficiency, by at least this much.",
-          "round_trip_efficiency_pct": "How much of what goes into the battery comes back out."
+          "round_trip_efficiency_pct": "How much of what goes into the battery comes back out.",
+          "grid_import_energy_entity": "Optional: the total energy imported from the grid (kWh, e.g. the inverter's grid import total). With it, today's cost counts what's already been imported, at each half-hour's price.",
+          "grid_export_energy_entity": "Optional: the total energy exported to the grid (kWh). With it, today's income counts what's already been exported."
         }
       },
       "flow": {
