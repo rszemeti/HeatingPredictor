@@ -683,3 +683,62 @@ def test_real_self_use_morning_no_afternoon_buy():
     assert feed and min(feed).hour >= 10 and max(feed).hour <= 13, feed
     soc = {t.astimezone(LON).strftime("%H:%M"): v for t, v in plan.soc if t.astimezone(LON).day == 29}
     assert soc["11:30"] > soc["08:30"] + 5           # the morning solar is stored
+
+
+def _agile_day(start, *, peak_p, soc, heat_kw=1.0, params=None, hours=36):
+    """A winter day on Cosy import with Agile Outgoing export: cheap import
+    13p in the Cosy windows (30p otherwise); export 8p, `peak_p` 16:00-19:00."""
+    starts = series(start, hours)
+    load = [(heat_kw + 0.4) * 0.5 for _ in starts]
+    pv = [0.0 for _ in starts]
+    def local_h(t):
+        lt = t.astimezone(LON)
+        return lt.hour + lt.minute / 60
+    def cheap(h):
+        return 4 <= h < 7 or 13 <= h < 16 or 22 <= h < 24
+    imp = [0.13 if cheap(local_h(t)) else 0.30 for t in starts]
+    exp = [peak_p if 16 <= local_h(t) < 19 else 0.08 for t in starts]
+    params = params or pl.BatteryParams(capacity_kwh=32, min_soc=15, reserve_soc=30,
+                                        charge_power_kw=8, discharge_power_kw=5,
+                                        load_margin_pct=10)
+    plan = pl.make_plan(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=pv, soc_now=soc,
+                        params=params, charge_windows=COSY, discharge_windows=NIGHT,
+                        import_price=imp, export_price=exp)
+    return plan, starts, load
+
+
+def test_sells_the_evening_surplus_and_keeps_enough_for_22_00():
+    """23 Nov, Agile Outgoing: fill to 100% by 16:00, sell the surplus in the
+    16:00-19:00 peak, and keep enough to reach the 22:00 Cosy fill at the
+    reserve (30%)."""
+    start = datetime(2026, 11, 24, 12, 0, tzinfo=LON)
+    plan, starts, load = _agile_day(start, peak_p=0.30, soc=60)
+    afternoon = find(plan, "charge", datetime(2026, 11, 24, 13, tzinfo=LON))
+    assert afternoon.enabled and afternoon.target_soc == 100, afternoon
+    sale = next(w for w in plan.windows if w.kind == "discharge" and w.enabled
+                and w.start.astimezone(LON).hour >= 16 and w.start.astimezone(LON).date() == start.date())
+    assert 16 <= sale.start.astimezone(LON).hour and sale.end.astimezone(LON).hour <= 19
+    assert "sell" in sale.reason
+    soc = dict(plan.soc)
+    at_22 = soc[datetime(2026, 11, 24, 22, tzinfo=LON).astimezone(timezone.utc)]
+    assert 30 <= at_22 <= 40, at_22             # the surplus went; the reserve stayed
+    assert min(v for t, v in plan.soc if t.astimezone(LON) <= datetime(2026, 11, 24, 22, tzinfo=LON)) >= 30 - 1e-6
+    # The plan lists its windows in time order, so the automation programs the sooner.
+    assert [w.start for w in plan.windows] == sorted(w.start for w in plan.windows)
+
+
+def test_no_sale_when_export_does_not_beat_the_charge_cost():
+    """15p export against 13p charging: 13/0.9 + 3 = 17.4p needed. Keep it."""
+    start = datetime(2026, 11, 24, 12, 0, tzinfo=LON)
+    plan, starts, load = _agile_day(start, peak_p=0.15, soc=60)
+    assert not any(w.kind == "discharge" and "sell" in w.reason for w in plan.windows)
+
+
+def test_no_export_prices_no_change():
+    start = datetime(2026, 11, 24, 12, 0, tzinfo=LON)
+    starts = series(start, 36)
+    load = [0.7 for _ in starts]
+    kw = dict(starts=starts, period_minutes=30, load_kwh=load, pv_kwh=[0.0] * len(starts),
+              soc_now=60, params=pl.BatteryParams(), charge_windows=COSY, discharge_windows=NIGHT)
+    a, b = pl.make_plan(**kw), pl.make_plan(**kw, import_price=[0.13] * len(starts))
+    assert [w.as_dict() for w in a.windows] == [w.as_dict() for w in b.windows]

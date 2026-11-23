@@ -570,6 +570,9 @@ async def test_flow_correction_catches_up(hass: HomeAssistant, fake_weather, fre
     (its 'settled' test looked at the forecast room, which starts from the
     measured room). Now: a proportional step straight away, and the integral
     keeps adding while the room stays low."""
+    # Midday: the default schedule steps at 06:30, so a morning run would
+    # see a target that hasn't been steady for two hours.
+    freezer.move_to(dt_util.start_of_local_day() + timedelta(hours=12))
     hass.states.async_set("number.hp_flow_target", "35.0", {"min": 25, "max": 55, "step": 0.5})
     hass.states.async_set("sensor.hp_room", "20.0", {"unit_of_measurement": "°C"})
 
@@ -643,6 +646,9 @@ async def test_weather_outage_keeps_the_plans(hass: HomeAssistant, fake_weather,
 
 
 async def test_flow_correction_survives_a_restart(hass: HomeAssistant, fake_weather, freezer) -> None:
+    # Midday: the default schedule steps at 06:30, so a morning run would
+    # see a target that hasn't been steady for two hours.
+    freezer.move_to(dt_util.start_of_local_day() + timedelta(hours=12))
     from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
     hass.states.async_set("number.hp_flow_target", "35.0", {"min": 25, "max": 55, "step": 0.5})
@@ -732,6 +738,9 @@ async def test_no_forecast_at_all_uses_the_outdoor_sensor(hass: HomeAssistant, f
 
 
 async def test_correction_gains_are_options_and_a_reload_keeps_it(hass: HomeAssistant, fake_weather, freezer) -> None:
+    # Midday: the default schedule steps at 06:30, so a morning run would
+    # see a target that hasn't been steady for two hours.
+    freezer.move_to(dt_util.start_of_local_day() + timedelta(hours=12))
     hass.states.async_set("number.hp_flow_target", "35.0", {"min": 25, "max": 55, "step": 0.5})
     hass.states.async_set("sensor.hp_room", "20.0", {"unit_of_measurement": "°C"})
 
@@ -759,3 +768,70 @@ async def test_correction_gains_are_options_and_a_reload_keeps_it(hass: HomeAssi
     await c2.async_refresh()
     assert c2.data["flow"]["correction_parts"]["integral"] == pytest.approx(built, abs=0.01)
     assert c2.data["flow"]["correction_parts"]["proportional"] == pytest.approx(0.2, abs=0.01)
+
+
+async def test_agile_outgoing_sells_the_evening_surplus(hass: HomeAssistant, fake_weather, freezer) -> None:
+    """23 Nov: Agile Outgoing export rates set: the plan fills by 16:00 and
+    sells the surplus 16:00-19:00, keeping enough for the 22:00 window."""
+    freezer.move_to(dt_util.start_of_local_day() + timedelta(hours=11))
+    hass.states.async_set("sensor.battery_soc", "60", {"unit_of_measurement": "%"})
+    _solcast(hass, 0.0)
+    day = dt_util.start_of_local_day()
+
+    def rates(price_of):
+        out = []
+        for d in (0, 1):
+            for i in range(48):
+                s = day + timedelta(days=d, minutes=30 * i)
+                out.append({"start": s, "end": s + timedelta(minutes=30),
+                            "value_inc_vat": price_of(s.hour + s.minute / 60)})
+        return out
+    cheap = lambda h: 4 <= h < 7 or 13 <= h < 16 or 22 <= h < 24  # noqa: E731
+    hass.states.async_set("event.import_today", "1", {"rates": rates(lambda h: 0.13 if cheap(h) else 0.30)})
+    hass.states.async_set("event.export_today", "1", {"rates": rates(lambda h: 0.30 if 16 <= h < 19 else 0.08)})
+    await _setup(hass, {**OPTIONS, **BATTERY,
+                        "rates_today_entity": "event.import_today",
+                        "export_rates_today_entity": "event.export_today"})
+    a = hass.states.get("sensor.heat_pump_battery_plan").attributes
+    wins = a["windows"]
+    afternoon = next(w for w in wins if w["kind"] == "charge"
+                     and dt_util.parse_datetime(w["start"]).hour == 13)
+    assert afternoon["enabled"] and afternoon["target_soc"] == 100, afternoon
+    sale = next(w for w in wins if w["kind"] == "discharge" and "sell" in w["reason"])
+    assert dt_util.parse_datetime(sale["start"]).hour >= 16 and sale["enabled"]
+    # The automation programs the next discharge window: the sale, not 00:30.
+    assert a["slots"]["discharge_1"]["start"] == sale["start"]
+
+
+
+async def test_correction_halves_when_the_room_crosses_the_target(hass: HomeAssistant, fake_weather, freezer) -> None:
+    """13 Nov: the build-up from a low day kept pushing after the room got there."""
+    freezer.move_to(dt_util.start_of_local_day() + timedelta(hours=12))
+    hass.states.async_set("number.hp_flow_target", "35.0", {"min": 25, "max": 55, "step": 0.5})
+    hass.states.async_set("sensor.hp_room", "20.0", {"unit_of_measurement": "°C"})
+
+    async def set_value(call):
+        hass.states.async_set("number.hp_flow_target", str(call.data["value"]),
+                              {"min": 25, "max": 55, "step": 0.5})
+    hass.services.async_register("number", "set_value", set_value)
+    entry = await _setup(hass, {**OPTIONS, "hp_flow_target_entity": "number.hp_flow_target",
+                                "hp_room_entity": "sensor.hp_room"})
+    coord = entry.runtime_data
+    target = coord.data["flow"]["target_now"]
+    room = lambda v: hass.states.async_set("sensor.hp_room", str(v), {"unit_of_measurement": "°C"})  # noqa: E731
+    room(target - 0.3)
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.heat_pump_flow_control"}, blocking=True)
+    await hass.async_block_till_done()
+    for _ in range(8):
+        freezer.tick(timedelta(minutes=15))
+        await coord.async_refresh()
+    built = coord.data["flow"]["correction_parts"]["integral"]
+    assert built > 1.0
+    room(target + 0.3)                          # crossed over
+    freezer.tick(timedelta(minutes=15))
+    await coord.async_refresh()
+    after = coord.data["flow"]["correction_parts"]["integral"]
+    assert after == pytest.approx(built * 0.5 - 3.0 * 0.25 * 0.25, abs=0.05)
+    freezer.tick(timedelta(minutes=15))         # staying over: normal unwinding only
+    await coord.async_refresh()
+    assert coord.data["flow"]["correction_parts"]["integral"] == pytest.approx(after - 3.0 * 0.25 * 0.25, abs=0.05)

@@ -107,7 +107,11 @@
           "charge_strategy": "Cheap window charging",
           "room_forecast": "Room for the solar peak sized on",
           "solar_power_entity": "Solar power",
-          "storage_mode_entity": "Inverter storage mode"
+          "storage_mode_entity": "Inverter storage mode",
+          "export_rates_today_entity": "Export rates today",
+          "export_rates_tomorrow_entity": "Export rates tomorrow",
+          "export_margin_p": "Sell only with this margin",
+          "round_trip_efficiency_pct": "Battery round-trip efficiency"
         },
         "data_description": {
           "battery_soc_entity": "A sensor reporting the battery's state of charge in %.",
@@ -132,7 +136,11 @@
           "charge_strategy": "Fill: charge every cheap window as far as the next day's solar allows, so a bad forecast can't leave you buying at full price. Minimum: charge only what the forecast says gets you to the next cheap window above the reserve.",
           "room_forecast": "Expected: Self-Use for as long as the median forecast allows, Feed-in priority only through the peak; the plan reruns every 15 minutes, so a sunnier day switches to Feed-in in time. Optimistic: keeps room for Solcast's 90th-percentile day, which exports more on an ordinary day and may then buy it back in a cheap window.",
           "solar_power_entity": "Optional: the inverter's solar (PV) power. Only used in Download planning data, to compare the real solar with the forecast.",
-          "storage_mode_entity": "Optional: the entity showing the inverter's storage mode (for example Self-Use or Feed-in priority). Only used in Download planning data, to compare with the planned mode."
+          "storage_mode_entity": "Optional: the entity showing the inverter's storage mode (for example Self-Use or Feed-in priority). Only used in Download planning data, to compare with the planned mode.",
+          "export_rates_today_entity": "Optional: the Octopus Energy export rates event for today (e.g. Agile Outgoing: …_export_current_day_rates). With it, the battery sells what's surplus to reaching the next cheap window at the reserve, when the export pays.",
+          "export_rates_tomorrow_entity": "The export rates event for tomorrow (…_export_next_day_rates).",
+          "export_margin_p": "Sell from the battery only when the export price beats the cheap window's price, divided by the round-trip efficiency, by at least this much.",
+          "round_trip_efficiency_pct": "How much of what goes into the battery comes back out."
         }
       },
       "flow": {

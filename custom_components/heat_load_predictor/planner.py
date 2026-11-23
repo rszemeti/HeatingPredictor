@@ -167,6 +167,11 @@ class BatteryParams:
     # True: fill every cheap window as far as the next day's solar allows.
     # False: charge only what the forecast says is needed to reach the next one.
     fill_cheap_windows: bool = True
+    # Selling from the battery (with export prices): only when the export
+    # price beats what the charge cost, allowing for the round trip, by at
+    # least this much (same unit as the prices, e.g. £/kWh).
+    export_margin: float = 0.03
+    round_trip_efficiency: float = 0.9
 
     def __post_init__(self) -> None:
         if self.capacity_kwh <= 0:
@@ -232,6 +237,8 @@ def make_plan(
     charge_windows: Sequence[tuple[time, time]],
     discharge_windows: Sequence[tuple[time, time]],
     charge_ranges: Sequence[tuple[datetime, datetime]] | None = None,
+    import_price: Sequence[float | None] | None = None,
+    export_price: Sequence[float | None] | None = None,
 ) -> Plan:
     """Plan charge and discharge windows across the forecast periods.
 
@@ -245,6 +252,13 @@ def make_plan(
     by `params.load_margin_pct`. The projected SOC and the solar room use the
     expected figures, so the projection shows the likely path and the gap
     above the reserve is the safety buffer.
+
+    With `import_price` and `export_price` (each period's price), the battery
+    also sells after a cheap window: only what's surplus to carrying the house
+    to the next cheap window at the reserve (cautious forecasts), in the
+    best-paid half-hours, and only where the export price beats the window's
+    charge cost over the round trip by `params.export_margin`. When a sale is
+    planned the window before it fills to 100%.
 
     The storage mode guards against the opposite mistake, solar beating the
     forecast and being clipped, so the room it keeps free is sized on
@@ -515,6 +529,15 @@ def make_plan(
                               f"keep the battery for {need:.1f} kWh after the window")
                 if short:
                     reason += " (charge rate too low to cover it all)"
+        # A sale after this window: then fill to 100% first (13 Nov rule:
+        # "always full if we plan to export").
+        cost = _mean_price(import_price, a, b)
+        sale_ok = (not overlaps and cost is not None and export_price is not None
+                   and _sale_periods(export_price, cost, b, gap_end, params,
+                                     _discharge_blocked(occ, idx, n)))
+        if sale_ok and (target < 100 or not enabled):
+            target, enabled = 100, True
+            reason = "fill to 100% for the export after it"
         if nxt is None:
             reason += " (next window beyond forecast)"
         plans.append(WindowPlan(o.kind, o.slot, o.start, o.end, enabled, target,
@@ -522,14 +545,104 @@ def make_plan(
         if enabled:
             for i in range(a, b):
                 actions[i] = ("charge", target)
+        if sale_ok:
+            sale = _plan_sale(
+                simulate(b)[-1], b, gap_end, cost, export_price, pv_kwh, load_kwh,
+                pv_cautious, load_cautious, dt_h, params, _discharge_blocked(occ, idx, n))
+            if sale is not None:
+                s_i, e_i, s_target, kwh, best = sale
+                plans.append(WindowPlan(
+                    "discharge", 1, starts[s_i], starts[s_i] + dt * (e_i - s_i), True,
+                    s_target, simulate(s_i)[-1], 0.0, 0.0,
+                    f"sell {kwh:.1f} kWh at up to {best * 100:.1f}p, down to {s_target}%: "
+                    f"enough left to reach the next cheap window at "
+                    f"{params.reserve_soc:.0f}%"))
+                for i in range(s_i, e_i):
+                    actions[i] = ("discharge", s_target)
 
     soc = simulate(n)
+    plans.sort(key=lambda w: (w.start, 0 if w.kind == "discharge" else 1))
     return Plan(
         windows=plans,
         soc=[(starts[i] + dt, soc[i + 1]) for i in range(n)],
         modes=list(zip(starts, modes)),
         clipped=list(zip(starts, clipped)),
     )
+
+
+def _mean_price(prices, a: int, b: int) -> float | None:
+    vals = [prices[i] for i in range(a, min(b, len(prices))) if prices[i] is not None] if prices else []
+    return sum(vals) / len(vals) if vals else None
+
+
+def _discharge_blocked(occ, idx, n: int) -> set[int]:
+    """Periods inside a configured discharge window (making room for solar)."""
+    out: set[int] = set()
+    for o in occ:
+        if o.kind == "discharge":
+            out.update(range(idx(o.start), idx(o.end)))
+    return out
+
+
+def _sale_periods(export_price, cost: float, a: int, b: int, p: BatteryParams,
+                  blocked: set[int]) -> list[int]:
+    """Periods in [a, b) where selling from the battery pays: the export price
+    beats the charge cost over the round trip by the margin."""
+    need = cost / p.round_trip_efficiency + p.export_margin
+    return [i for i in range(a, min(b, len(export_price)))
+            if i not in blocked and export_price[i] is not None and export_price[i] >= need]
+
+
+def _plan_sale(soc_b: float, b: int, gap_end: int, cost: float, export_price, pv, load,
+               pv_c, load_c, dt_h: float, p: BatteryParams, blocked: set[int]):
+    """The best single sale window in [b, gap_end): (start, end, target SOC,
+    kWh sold, best price), or None.
+
+    The target is what the battery must keep at the window's end to carry the
+    house to the next cheap window at the reserve, on the cautious forecasts;
+    what's above it is sold, in the best-paid contiguous half-hours."""
+    good = set(_sale_periods(export_price, cost, b, gap_end, p, blocked))
+    if not good:
+        return None
+    lim = p.export_limit_kw * dt_h
+    reserve = replace(p, min_soc=max(p.min_soc, p.reserve_soc))
+    keep_cache: dict[int, int] = {}
+
+    def keep(e: int) -> int:
+        if e not in keep_cache:
+            keep_cache[e] = int(math.ceil(max(reserve.min_soc,
+                                              _keep_soc(pv_c, load_c, e, gap_end, dt_h, reserve))))
+        return keep_cache[e]
+
+    best = None
+    for s_i in sorted(good):
+        # SOC at s_i on self-use from b.
+        s0 = soc_b
+        for i in range(b, s_i):
+            s0 = _step(s0, None, pv[i], load[i], dt_h, p)
+        e_i = s_i
+        while e_i < gap_end and e_i in good:
+            e_i += 1
+            t = keep(e_i)
+            if s0 <= t + 0.5:
+                continue
+            s_, value, kwh, top = s0, 0.0, 0.0, 0.0
+            for i in range(s_i, e_i):
+                nxt = _step(s_, ("discharge", t), pv[i], load[i], dt_h, p)
+                out = (s_ - nxt) / 100 * p.capacity_kwh
+                sold = max(0.0, min(lim, out + pv[i] - load[i]))
+                value += sold * (export_price[i] - cost / p.round_trip_efficiency)
+                kwh += sold
+                if sold > 0:
+                    top = max(top, export_price[i])
+                s_ = nxt
+            if kwh >= 0.5 and (best is None or value > best[0] + 1e-9):
+                best = (value, s_i, e_i, t, kwh, top)
+    if best is None:
+        return None
+    # Trim periods at the end that sell nothing (target reached earlier).
+    _, s_i, e_i, t, kwh, top = best
+    return s_i, e_i, t, kwh, top
 
 
 def _keep_soc(pv, load, a: int, b: int, dt_h: float, p: BatteryParams) -> float:

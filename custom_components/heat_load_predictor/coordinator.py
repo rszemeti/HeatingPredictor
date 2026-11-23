@@ -41,6 +41,10 @@ from .const import (
     CONF_LOAD_MARGIN,
     CONF_CHARGE_STRATEGY,
     CONF_RATES_TODAY,
+    CONF_EXPORT_RATES_TODAY,
+    CONF_EXPORT_RATES_TOMORROW,
+    CONF_EXPORT_MARGIN,
+    CONF_ROUND_TRIP,
     CONF_RATES_TOMORROW,
     CONF_SOLAR_CONFIDENCE,
     CONF_SOLAR_HEADROOM,
@@ -157,6 +161,7 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._flow_control_status = "off"
         self._flow_following = False   # the pump is on the plan (for the correction)
         self._flow_off_at: datetime | None = None
+        self._flow_last_err = 0.0      # last non-zero room error (for crossing)
         self._flow_corr_at: datetime | None = None
         self._warned_gas: set[str] = set()
 
@@ -497,9 +502,17 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self.flow_control or not self._flow_following:
             err = 0.0
         elif self._flow_corr_at is not None and err:
+            # The room has crossed the target: the build-up that got it there
+            # is now too much (the house responds slowly), so halve it once
+            # rather than unwinding it slowly. 13 Nov: +2.8 °C built over a
+            # low day kept the room 0.3 °C high all evening.
+            if self._flow_correction * err < 0 and self._flow_last_err * err <= 0:
+                self._flow_correction *= 0.5
             dt_h = min(1.0, (now_utc - self._flow_corr_at).total_seconds() / 3600)
             self._flow_correction = max(-5.0, min(5.0, self._flow_correction + k_i * err * dt_h))
             self._save_state()
+        if err:
+            self._flow_last_err = err
         self._flow_corr_at = now_utc
         correction = (max(-6.0, min(6.0, self._flow_correction + k_p * err))
                       if self.flow_control else 0.0)
@@ -507,8 +520,13 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         house = self._flow_house
         if house:
             per_h = (results[1].start - results[0].start).total_seconds() / 3600 if len(results) > 1 else 0.5
+            def setback(r) -> bool:
+                # The schedule stepped down within the last six hours.
+                t0 = dt_util.as_utc(r.start)
+                return any(target(t0 - timedelta(minutes=30 * k)) > r.t_target + 0.25
+                           for k in range(1, 13))
             flows = flowlaw.plan_house_flows(
-                [(r.t_target, r.t_in_start, r.t_in_end, r.t_out, r.heat_kw) for r in results],
+                [(r.t_target, r.t_in_start, r.t_in_end, r.t_out, r.heat_kw, setback(r)) for r in results],
                 house, p, correction, per_h)
         else:
             rows = [(r.heat_kw, (r.t_in_start + r.t_in_end) / 2) for r in results]
@@ -1104,10 +1122,10 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return [prof[slot_of(t)] * dt_h for t in starts], f"learned from {days:.1f} days"
         return [float(o[CONF_BASELOAD]) * dt_h for _ in starts], f"fixed {float(o[CONF_BASELOAD]):.2f} kW"
 
-    def _rates(self) -> list[tuple[datetime, datetime, float]]:
+    def _rates(self, keys=(CONF_RATES_TODAY, CONF_RATES_TOMORROW)) -> list[tuple[datetime, datetime, float]]:
         """(start, end, price) periods from Octopus Energy rate event entities."""
         out: list[tuple[datetime, datetime, float]] = []
-        for key in (CONF_RATES_TODAY, CONF_RATES_TOMORROW):
+        for key in keys:
             entity_id = self.config_entry.options.get(key)
             if entity_id and "_gas_" in entity_id:
                 # Gas is priced far below electricity: it would make the whole
@@ -1199,7 +1217,24 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             solar_headroom_kwh=float(o[CONF_SOLAR_HEADROOM]),
             load_margin_pct=float(o[CONF_LOAD_MARGIN]),
             fill_cheap_windows=o.get(CONF_CHARGE_STRATEGY, "fill") != "minimum",
+            export_margin=float(o.get(CONF_EXPORT_MARGIN, 3.0)) / 100,
+            round_trip_efficiency=float(o.get(CONF_ROUND_TRIP, 90)) / 100,
         )
+        # Each period's prices (£/kWh), for selling from the battery: only
+        # with an export tariff set.
+        import_price = export_price = None
+        if o.get(CONF_EXPORT_RATES_TODAY):
+            def per_period(rates):
+                out = []
+                for t in starts:
+                    tu = dt_util.as_utc(t)
+                    out.append(next((p_ for a_, b_, p_ in rates
+                                     if dt_util.as_utc(a_) <= tu < dt_util.as_utc(b_)), None))
+                return out
+            export_price = per_period(self._rates((CONF_EXPORT_RATES_TODAY, CONF_EXPORT_RATES_TOMORROW)))
+            import_price = per_period(self._rates())
+            if not any(v is not None for v in export_price) or not any(v is not None for v in import_price):
+                import_price = export_price = None
         plan = make_plan(
             starts=starts,
             period_minutes=self.period,
@@ -1212,6 +1247,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             charge_windows=parse_windows(o[CONF_CHEAP_WINDOWS]),
             discharge_windows=parse_windows(o[CONF_DISCHARGE_WINDOWS]),
             charge_ranges=charge_ranges,
+            import_price=import_price,
+            export_price=export_price,
         )
         # Everything the planner saw, for "Download planning data" on the card.
         self.plan_inputs = {
@@ -1236,6 +1273,8 @@ class HeatLoadCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "charge_ranges": [(a.isoformat(), b.isoformat()) for a, b in charge_ranges]
             if charge_ranges is not None else None,
             "charge_windows_from": charge_source,
+            "import_price": import_price,
+            "export_price": export_price,
             "options": {k: v for k, v in o.items() if isinstance(v, (str, int, float, bool)) or v is None},
             "plan": {
                 "windows": [w.as_dict() for w in plan.windows],

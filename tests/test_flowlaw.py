@@ -212,3 +212,15 @@ def test_house_flows_idle_after_a_setback_and_boost_a_warm_up():
     ], house, p)
     assert out[0] is None
     assert out[1] > house.flow(21.0, 5.0) + 5
+
+
+
+def test_no_idle_without_a_scheduled_step_down():
+    """13 Nov: target flat at 22 °C, the Shelly read 22.6 °C, and the pump
+    idled for two hours. Only a scheduled setback may idle it."""
+    house = fl.HouseFit(s=1.0, i=0.0, tau=6.0, hours=100, rmse=2, mode="fit")
+    p = fl.FlowParams()
+    flat = fl.plan_house_flows([(22.0, 22.6, 22.5, 5.0, 0.0, False)], house, p)
+    assert flat[0] is not None and flat[0] == round(house.flow(22.0, 5.0) * 2) / 2
+    after_step = fl.plan_house_flows([(18.0, 21.5, 21.3, 5.0, 0.0, True)], house, p)
+    assert after_step[0] is None

@@ -351,12 +351,14 @@ def model_slope(h_w_per_k: float, gains_kw: float, t_room: float, k: float, n: f
     return max(0.1, (f_cold - f_warm) / 10)
 
 
-def plan_house_flows(rows: Sequence[tuple[float, float, float, float, float]], house: HouseFit,
+def plan_house_flows(rows: Sequence[tuple], house: HouseFit,
                      p: FlowParams, correction: float = 0.0, period_h: float = 0.5,
                      band: float = 0.5) -> list[float | None]:
     """Flow for each period from the learned curve, at the period's target.
 
-    rows: (target, modelled room at start, modelled room at end, outdoor, heat kW).
+    rows: (target, modelled room at start, modelled room at end, outdoor, heat kW
+    [, setback]); setback: the schedule's target has stepped down in the last
+    few hours. Without it every row counts as one (older callers).
 
     A weather curve, not on/off: a room a little off target is left to the
     correction (which lowers or raises the flow), so the heat pump runs
@@ -364,11 +366,15 @@ def plan_house_flows(rows: Sequence[tuple[float, float, float, float, float]], h
     target, with the heat model coasting) idles it, and only a real warm-up
     (`band` or more below) gets the extra warm-up flow.
     7 Nov: idling whenever the room read 0.2 °C high, then 42-45 °C to
-    recover, swung the flow between 25 and 45 °C."""
+    recover, swung the flow between 25 and 45 °C. 13 Nov: with the target flat
+    at 22 °C, a 22.6 °C reading idled it for two hours: only a scheduled step
+    down counts as a setback."""
     out: list[float | None] = []
-    for target, t_start, t_end, t_out, heat_kw in rows:
+    for row in rows:
+        target, t_start, t_end, t_out, heat_kw = row[:5]
+        setback = row[5] if len(row) > 5 else True
         gap = target - t_start
-        if gap <= -band and heat_kw < p.idle_kw:
+        if setback and gap <= -band and heat_kw < p.idle_kw:
             out.append(None)
             continue
         rise = (t_end - t_start) / period_h if gap >= band else 0.0

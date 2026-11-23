@@ -1,7 +1,7 @@
 """Constants for Heat Load Predictor."""
 
 DOMAIN = "heat_load_predictor"
-VERSION = "0.5.13"
+VERSION = "0.5.14"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR = "indoor_temp_entity"
@@ -74,6 +74,13 @@ BATTERY_DEFAULTS[CONF_CHARGE_STRATEGY] = "fill"
 
 CONF_RATES_TODAY = "rates_today_entity"
 CONF_RATES_TOMORROW = "rates_tomorrow_entity"
+# Export tariff (e.g. Agile Outgoing): with these, the battery sells its surplus.
+CONF_EXPORT_RATES_TODAY = "export_rates_today_entity"
+CONF_EXPORT_RATES_TOMORROW = "export_rates_tomorrow_entity"
+CONF_EXPORT_MARGIN = "export_margin_p"        # p/kWh over the charge cost
+CONF_ROUND_TRIP = "round_trip_efficiency_pct"
+BATTERY_DEFAULTS[CONF_EXPORT_MARGIN] = 3.0
+BATTERY_DEFAULTS[CONF_ROUND_TRIP] = 90
 CONF_CHEAP_TOLERANCE = "cheap_tolerance_pct"
 BATTERY_DEFAULTS[CONF_CHEAP_TOLERANCE] = 10
 WRITE_LEAD_MINUTES = 10   # update the inverter this long before each window
