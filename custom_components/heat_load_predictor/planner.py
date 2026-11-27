@@ -610,49 +610,60 @@ def _plan_sale(soc_b: float, b: int, gap_end: int, cost: float, export_price, pv
     """The best single sale window in [b, gap_end): (start, end, target SOC,
     kWh sold, best price), or None.
 
-    The target is what the battery must keep at the window's end to carry the
-    house to the next cheap window at the reserve, on the cautious forecasts;
-    what's above it is sold, in the best-paid contiguous half-hours."""
+    Selling stops at the SOC that still carries the house from then to the
+    next cheap window at the reserve (on the cautious forecasts), and the
+    window ends there: after it the battery is back on Self-Use, running the
+    house. 27 Nov: the window ran to 22:00 with the reserve itself as the
+    target, so the inverter sold down to 30% by 19:00 and then held it there,
+    and the house ran on the grid at the standard rate until 22:00."""
     good = set(_sale_periods(export_price, cost, b, gap_end, p, blocked))
     if not good:
         return None
     lim = p.export_limit_kw * dt_h
     reserve = replace(p, min_soc=max(p.min_soc, p.reserve_soc))
-    keep_cache: dict[int, int] = {}
+    keep_cache: dict[int, float] = {}
 
-    def keep(e: int) -> int:
+    def keep(e: int) -> float:
+        """SOC needed at the start of period e to reach the next cheap window
+        at the reserve, the house running on the battery from e."""
         if e not in keep_cache:
-            keep_cache[e] = int(math.ceil(max(reserve.min_soc,
-                                              _keep_soc(pv_c, load_c, e, gap_end, dt_h, reserve))))
+            keep_cache[e] = max(reserve.min_soc, _keep_soc(pv_c, load_c, e, gap_end, dt_h, reserve))
         return keep_cache[e]
 
     best = None
     for s_i in sorted(good):
         # SOC at s_i on self-use from b.
-        s0 = soc_b
+        cur = soc_b
         for i in range(b, s_i):
-            s0 = _step(s0, None, pv[i], load[i], dt_h, p)
-        e_i = s_i
+            cur = _step(cur, None, pv[i], load[i], dt_h, p)
+        value = kwh = top = 0.0
+        e_i, target = s_i, None
         while e_i < gap_end and e_i in good:
+            need_after = keep(e_i + 1)
+            full = _step(cur, ("discharge", p.min_soc), pv[e_i], load[e_i], dt_h, p)
+            stop = full < need_after
+            t = int(math.ceil(need_after)) if stop else None
+            nxt = _step(cur, ("discharge", t), pv[e_i], load[e_i], dt_h, p) if stop else full
+            out = (cur - nxt) / 100 * p.capacity_kwh
+            sold = max(0.0, min(lim, out + pv[e_i] - load[e_i]))
+            value += sold * (export_price[e_i] - cost / p.round_trip_efficiency)
+            kwh += sold
+            if sold > 0:
+                top = max(top, export_price[e_i])
+            cur = nxt
             e_i += 1
-            t = keep(e_i)
-            if s0 <= t + 0.5:
+            if stop:
+                target = t
+                break
+        if target is None:
+            # The profitable half-hours ran out first: stop at what's needed then.
+            target = int(math.ceil(keep(e_i)))
+            if cur < target:
                 continue
-            s_, value, kwh, top = s0, 0.0, 0.0, 0.0
-            for i in range(s_i, e_i):
-                nxt = _step(s_, ("discharge", t), pv[i], load[i], dt_h, p)
-                out = (s_ - nxt) / 100 * p.capacity_kwh
-                sold = max(0.0, min(lim, out + pv[i] - load[i]))
-                value += sold * (export_price[i] - cost / p.round_trip_efficiency)
-                kwh += sold
-                if sold > 0:
-                    top = max(top, export_price[i])
-                s_ = nxt
-            if kwh >= 0.5 and (best is None or value > best[0] + 1e-9):
-                best = (value, s_i, e_i, t, kwh, top)
+        if kwh >= 0.5 and (best is None or value > best[0] + 1e-9):
+            best = (value, s_i, e_i, target, kwh, top)
     if best is None:
         return None
-    # Trim periods at the end that sell nothing (target reached earlier).
     _, s_i, e_i, t, kwh, top = best
     return s_i, e_i, t, kwh, top
 

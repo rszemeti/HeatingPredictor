@@ -533,7 +533,8 @@ def _replay(name, optimistic=False):
         pv_low_kwh=d["pv_low_kwh"], pv_high_kwh=d.get("pv_high_kwh") if optimistic else None, soc_now=d["soc_now"],
         params=pl.BatteryParams(**d["params"]),
         charge_windows=pl.parse_windows(d["cheap_windows"]),
-        discharge_windows=pl.parse_windows(d["discharge_windows"]), charge_ranges=ranges)
+        discharge_windows=pl.parse_windows(d["discharge_windows"]), charge_ranges=ranges,
+        import_price=d.get("import_price"), export_price=d.get("export_price"))
 
 
 def test_real_plan_across_the_clocks_going_back():
@@ -757,3 +758,25 @@ def test_grid_flows_balance():
         clipped = plan.clipped[i][1]
         assert gi >= 0 and 0 <= go <= lim + 1e-9
         assert load[i] + batt_in + go + clipped == pytest.approx(pv[i] + gi, abs=1e-6), i
+
+
+
+def test_real_agile_sale_keeps_enough_for_the_evening():
+    """Regression (27 Nov, real data): the 16:00 sale ran to 22:00 with the
+    reserve itself as its target. The inverter sold down to 30% by 19:00 and
+    held it there, so the house ran on the grid at 23p until 22:00. The sale
+    must stop where the house can still reach 22:00 at the reserve, and the
+    window end there."""
+    d, starts, plan = _replay("plan_2026-11-27_agile_sale.json")
+    reserve = d["params"]["reserve_soc"]
+    sales = [w for w in plan.windows if w.kind == "discharge" and w.enabled and "sell" in w.reason]
+    assert sales
+    soc = {t.astimezone(timezone.utc): v for t, v in plan.soc}
+    for w in sales:
+        nxt = min(c.start for c in plan.windows if c.kind == "charge" and c.start >= w.end)
+        # The window ends before the next cheap window, so the house runs on the battery after it...
+        assert w.end < nxt, (w.start, w.end, nxt)
+        assert w.target_soc > reserve, w.target_soc
+        # ...and arrives at the next cheap window no lower than the reserve.
+        at = soc[nxt.astimezone(timezone.utc)]
+        assert at >= reserve - 0.5, (w.start, at)

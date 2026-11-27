@@ -193,13 +193,23 @@ async def test_discharge_stops_at_target(hass: HomeAssistant, freezer) -> None:
     assert any(e == "log" and "reached target" in m for e, m in calls)
 
 
-async def test_discharge_check_ignored_outside_window(hass: HomeAssistant, freezer) -> None:
+async def test_discharge_stops_at_target_even_when_the_plan_dropped_the_window(hass: HomeAssistant, freezer) -> None:
+    """27 Nov: once the battery reached the sale's target, the plan (rerun
+    from the live SOC) no longer listed the window, the stop step didn't
+    match, and the inverter held 30% from 19:00 to 22:00 on grid power. Slot
+    on and battery at its target: switch it off, plan or no plan."""
     day = datetime(2026, 6, 15, tzinfo=LON)
     await _rig(hass, freezer, day, soc=95, pv_peak=12.0, temp=16.0)
     await _at(hass, freezer, day, 0, 25)
+    hass.states.async_set("number.solis8_timed_charge_discharge_on_off", str(64 | 4))
+    hass.states.async_set("number.solis8_timed_discharge_soc", "30")
+    hass.states.async_set("sensor.solis8_battery_soc", "30")
+    await _at(hass, freezer, day, 9, 2)          # no planned discharge now
+    assert int(hass.states.get("number.solis8_timed_charge_discharge_on_off").state) == 4
+    # Above the target it's left alone.
     hass.states.async_set("number.solis8_timed_charge_discharge_on_off", "64")
-    hass.states.async_set("sensor.solis8_battery_soc", "10")
-    await _at(hass, freezer, day, 9, 2)          # after 05:30: not this job's business
+    hass.states.async_set("sensor.solis8_battery_soc", "60")
+    await _at(hass, freezer, day, 9, 6)
     assert hass.states.get("number.solis8_timed_charge_discharge_on_off").state == "64"
 
 

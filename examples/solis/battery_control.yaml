@@ -9,9 +9,11 @@ description: >
      if the plan for a charge window that's already running has changed, write
      it again. If the plan is
      unavailable, fixed Cosy-time triggers keep discharge off and charge to 80%.
-  2. Stop discharge at target - every 2 minutes during the discharge window,
-     once SOC reaches the target, switch discharge slot 1 off so the inverter
-     doesn't import from the grid to hold that level.
+  2. Stop discharge at target - every 2 minutes, whenever discharge slot 1 is
+     on and the battery is at its target, switch the slot off, so the inverter
+     doesn't hold that level and run the house from the grid. This doesn't
+     depend on the plan: once the battery reaches the target the plan (rerun
+     from the live SOC) may no longer list the window at all.
   3. Storage mode - every 30 minutes set the mode the plan recommends:
      Self-Use (store all spare solar) unless that would leave too little room
      for the solar above the export limit still to come, Feed-in priority
@@ -228,10 +230,9 @@ actions:
         conditions:
           - condition: trigger
             id: discharge_check
-          - condition: template
-            value_template: >-
-              {% set w = (state_attr(plan_entity, 'slots') or {}).get('discharge_1') %}
-              {{ w is mapping and w.enabled and as_datetime(w.start) <= now() < as_datetime(w.end) }}
+          # Not tied to the plan's window: 27 Nov, the plan dropped the sale
+          # once the battery reached its target, this step stopped matching,
+          # and the inverter held 30% from 19:00 to 22:00 on grid power.
           - condition: template
             value_template: "{{ states(mask_entity) | int(0) | bitwise_and(64) > 0 }}"
           - condition: template
